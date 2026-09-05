@@ -337,6 +337,12 @@ func TestScopeFromCapabilityStatement(t *testing.T) {
 	if s.GenericResources != ScopeReferenced {
 		t.Errorf("GenericResources = %q, want ScopeReferenced", s.GenericResources)
 	}
+	if s.ValueSets != ScopeReferenced {
+		t.Errorf("ValueSets = %q, want ScopeReferenced", s.ValueSets)
+	}
+	if s.CodeSystems != ScopeReferenced {
+		t.Errorf("CodeSystems = %q, want ScopeReferenced", s.CodeSystems)
+	}
 }
 
 func TestScopeFromCapabilityStatement_SupportedProfiles(t *testing.T) {

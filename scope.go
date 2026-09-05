@@ -1,5 +1,7 @@
 package fhir
 
+import "strings"
+
 // ScopePolicy controls how a resource category is indexed by a scoped
 // Registry.
 type ScopePolicy string
@@ -199,5 +201,139 @@ func ScopeFromCapabilityStatement(cs *CapabilityStatement) *Scope {
 	}
 	s.SearchParams = ScopeReferenced
 	s.GenericResources = ScopeReferenced
+	s.ValueSets = ScopeReferenced
+	s.CodeSystems = ScopeReferenced
 	return s
+}
+
+// canonicalURL strips a FHIR version fragment (e.g. "|4.0.1") from a canonical
+// URL so it can be matched against stored resource URLs.
+func canonicalURL(url string) string {
+	if i := strings.Index(url, "|"); i >= 0 {
+		return url[:i]
+	}
+	return url
+}
+
+// collectCodeSystemURLs adds every CodeSystem system URL referenced by a
+// ValueSet's compose include/exclude blocks to the given set.
+func collectCodeSystemURLs(vs *ValueSet, cs map[string]bool) {
+	if vs == nil || vs.Compose == nil {
+		return
+	}
+	for _, inc := range vs.Compose.Include {
+		if inc.System != "" {
+			cs[canonicalURL(inc.System)] = true
+		}
+	}
+	for _, exc := range vs.Compose.Exclude {
+		if exc.System != "" {
+			cs[canonicalURL(exc.System)] = true
+		}
+	}
+}
+
+// Resolve finalises a scoped Registry after all resources have been loaded.
+// When ValueSets or CodeSystems policy is ScopeReferenced, those resources are
+// buffered during loading; Resolve indexes the ones referenced by in-scope
+// StructureDefinitions (via element bindings) and transitively by other
+// referenced ValueSets (via compose includes). It is idempotent and a no-op
+// when no category uses ScopeReferenced.
+func (r *Registry) Resolve() {
+	if r.Scope == nil {
+		return
+	}
+	if r.Scope.ValueSets != ScopeReferenced && r.Scope.CodeSystems != ScopeReferenced {
+		return
+	}
+
+	// 1. Collect seed ValueSet URLs from in-scope StructureDefinition bindings.
+	referencedVS := make(map[string]bool)
+	r.mu.RLock()
+	for _, sd := range r.byURL {
+		if sd.Snapshot != nil {
+			for _, elem := range sd.Snapshot.Elements {
+				if elem.Binding != nil && elem.Binding.ValueSet != "" {
+					referencedVS[canonicalURL(elem.Binding.ValueSet)] = true
+				}
+			}
+		}
+		if sd.Differential != nil {
+			for _, elem := range sd.Differential.Elements {
+				if elem.Binding != nil && elem.Binding.ValueSet != "" {
+					referencedVS[canonicalURL(elem.Binding.ValueSet)] = true
+				}
+			}
+		}
+	}
+	r.mu.RUnlock()
+
+	// 2. Fixpoint: expand referenced ValueSets through compose includes.
+	for changed := true; changed; {
+		changed = false
+		r.mu.RLock()
+		for url, vs := range r.pendingValueSets {
+			if !referencedVS[url] || vs == nil || vs.Compose == nil {
+				continue
+			}
+			for _, inc := range vs.Compose.Include {
+				for _, vsURL := range inc.ValueSet {
+					cu := canonicalURL(vsURL)
+					if !referencedVS[cu] {
+						referencedVS[cu] = true
+						changed = true
+					}
+				}
+			}
+			for _, exc := range vs.Compose.Exclude {
+				for _, vsURL := range exc.ValueSet {
+					cu := canonicalURL(vsURL)
+					if !referencedVS[cu] {
+						referencedVS[cu] = true
+						changed = true
+					}
+				}
+			}
+		}
+		r.mu.RUnlock()
+	}
+
+	// 3. Collect referenced CodeSystem URLs.
+	referencedCS := make(map[string]bool)
+	if r.Scope.CodeSystems == ScopeReferenced {
+		r.mu.RLock()
+		if r.Scope.ValueSets == ScopeReferenced {
+			for url, vs := range r.pendingValueSets {
+				if referencedVS[url] {
+					collectCodeSystemURLs(vs, referencedCS)
+				}
+			}
+		} else {
+			// ValueSets are ScopeAll: all indexed ValueSets are in scope.
+			for _, vs := range r.valueSets {
+				collectCodeSystemURLs(vs, referencedCS)
+			}
+		}
+		r.mu.RUnlock()
+	}
+
+	// 4. Index matching pending resources and clear the buffers.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Scope.ValueSets == ScopeReferenced {
+		for url, vs := range r.pendingValueSets {
+			if referencedVS[url] {
+				r.valueSets[url] = vs
+			}
+		}
+		r.pendingValueSets = make(map[string]*ValueSet)
+	}
+	if r.Scope.CodeSystems == ScopeReferenced {
+		for url, cs := range r.pendingCodeSystems {
+			if referencedCS[url] {
+				r.codeSystems[url] = cs
+			}
+		}
+		r.pendingCodeSystems = make(map[string]*CodeSystem)
+	}
 }

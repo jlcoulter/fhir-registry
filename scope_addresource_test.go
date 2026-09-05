@@ -10,7 +10,7 @@ import (
 
 func TestAddResourceWithResourceTypesScope_SD(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithResourceTypes("Patient")
+	reg.Scope = NewScope().WithResourceTypes("Patient")
 	if err := reg.addResource("p.json", []byte(`{"resourceType":"StructureDefinition","url":"http://example.org/StructureDefinition/Patient","type":"Patient","derivation":""}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestAddResourceWithResourceTypesScope_SD(t *testing.T) {
 
 func TestAddResourceWithResourceTypesScope_ProfileAllowed(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithResourceTypes("Patient").WithProfiles("http://example.org/StructureDefinition/au-observation")
+	reg.Scope = NewScope().WithResourceTypes("Patient").WithProfiles("http://example.org/StructureDefinition/au-observation")
 	if err := reg.addResource("o.json", []byte(`{"resourceType":"StructureDefinition","url":"http://example.org/StructureDefinition/au-observation","type":"Observation","derivation":"constraint"}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestAddResourceWithResourceTypesScope_ProfileAllowed(t *testing.T) {
 
 func TestAddResourceWithResourceTypesScope_BaseDefAlwaysIncluded(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithResourceTypes("Patient")
+	reg.Scope = NewScope().WithResourceTypes("Patient")
 	// Base Patient definition (derivation="") must be included even though its
 	// URL is not in Profiles.
 	if err := reg.addResource("p.json", []byte(`{"resourceType":"StructureDefinition","url":"http://hl7.org/fhir/StructureDefinition/Patient","type":"Patient","derivation":""}`)); err != nil {
@@ -51,7 +51,7 @@ func TestAddResourceWithResourceTypesScope_BaseDefAlwaysIncluded(t *testing.T) {
 
 func TestAddResourceWithProfilesScope_OnlyProfiles(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithProfiles("http://example.org/StructureDefinition/au-patient")
+	reg.Scope = NewScope().WithProfiles("http://example.org/StructureDefinition/au-patient")
 	if err := reg.addResource("p.json", []byte(`{"resourceType":"StructureDefinition","url":"http://example.org/StructureDefinition/au-patient","type":"Patient","derivation":"constraint"}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestAddResourceWithProfilesScope_OnlyProfiles(t *testing.T) {
 
 func TestAddResourceWithScopeNoneValueSets(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithValueSets(ScopeNone)
+	reg.Scope = NewScope().WithValueSets(ScopeNone)
 	if err := reg.addResource("vs.json", []byte(`{"resourceType":"ValueSet","url":"http://example.org/ValueSet/vs","status":"active"}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestAddResourceWithScopeNoneValueSets(t *testing.T) {
 
 func TestAddResourceWithScopeNoneCodeSystems(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithCodeSystems(ScopeNone)
+	reg.Scope = NewScope().WithCodeSystems(ScopeNone)
 	if err := reg.addResource("cs.json", []byte(`{"resourceType":"CodeSystem","url":"http://example.org/CodeSystem/cs","status":"draft"}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestAddResourceWithScopeNoneCodeSystems(t *testing.T) {
 
 func TestAddResourceWithScopeReferencedSearchParams(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithResourceTypes("Patient").WithSearchParams(ScopeReferenced)
+	reg.Scope = NewScope().WithResourceTypes("Patient").WithSearchParams(ScopeReferenced)
 	if err := reg.addResource("sp1.json", []byte(`{"resourceType":"SearchParameter","url":"http://example.org/SearchParameter/name","code":"name","base":["Patient"],"type":"string"}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAddResourceWithScopeReferencedSearchParams(t *testing.T) {
 
 func TestAddResourceWithScopeNoneGenericResources(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithGenericResources(ScopeNone)
+	reg.Scope = NewScope().WithGenericResources(ScopeNone)
 	if err := reg.addResource("p.json", []byte(`{"resourceType":"Patient","id":"p1"}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestAddResourceWithScopeNoneGenericResources(t *testing.T) {
 
 func TestAddResourceWithScopeReferencedGenericResources(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithResourceTypes("Patient").WithGenericResources(ScopeReferenced)
+	reg.Scope = NewScope().WithResourceTypes("Patient").WithGenericResources(ScopeReferenced)
 	if err := reg.addResource("p.json", []byte(`{"resourceType":"Patient","id":"p1"}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestAddResourceNilScopeIndexesEverything(t *testing.T) {
 
 func TestAddResourceWithScopeNoneCapabilityStatements(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithCapabilityStatements(ScopeNone)
+	reg.Scope = NewScope().WithCapabilityStatements(ScopeNone)
 	if err := reg.addResource("cs.json", []byte(`{"resourceType":"CapabilityStatement","url":"http://example.org/CapabilityStatement/cs","fhirVersion":"4.0.1"}`)); err != nil {
 		t.Fatalf("addResource: %v", err)
 	}

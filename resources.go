@@ -149,8 +149,15 @@ type Resource struct {
 // AddValueSet indexes a ValueSet by its canonical URL.
 func (r *Registry) AddValueSet(vs *ValueSet) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Scope != nil && r.Scope.ValueSets == ScopeReferenced {
+		r.pendingValueSets[vs.URL] = vs
+		return
+	}
+	if r.Scope != nil && !r.Scope.AllowsValueSet() {
+		return
+	}
 	r.valueSets[vs.URL] = vs
-	r.mu.Unlock()
 }
 
 // ValueSet returns the ValueSet for a canonical URL.
@@ -164,8 +171,15 @@ func (r *Registry) ValueSet(url string) (*ValueSet, bool) {
 // AddCodeSystem indexes a CodeSystem by its canonical URL.
 func (r *Registry) AddCodeSystem(cs *CodeSystem) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Scope != nil && r.Scope.CodeSystems == ScopeReferenced {
+		r.pendingCodeSystems[cs.URL] = cs
+		return
+	}
+	if r.Scope != nil && !r.Scope.AllowsCodeSystem() {
+		return
+	}
 	r.codeSystems[cs.URL] = cs
-	r.mu.Unlock()
 }
 
 // CodeSystem returns the CodeSystem for a canonical URL.

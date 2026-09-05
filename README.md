@@ -11,6 +11,7 @@ A Go library for loading, indexing, and reasoning about FHIR structure definitio
 - **Marshal** - normalise instance resources against type trees (array/scalar wrapping, choice elements, cardinality checks).
 - **Cardinality helpers** - `IsMulti`, `IsRequired`, `Cardinality`, `PrimaryTypeCode`, `IsChoice`, `ChoiceName`.
 - **Terminology & conformance resources** - index ValueSets, CodeSystems, CapabilityStatements, and SearchParameters from packages, plus any other resource type as an opaque `Resource`.
+- **Scoped registry** - narrow which resources a Registry indexes, e.g. to only what a package's CapabilityStatement declares as supported.
 
 ## Usage
 
@@ -84,6 +85,56 @@ Each type also has a matching `Add*` method for programmatic registration
 - **`AllResources()`** returns resources ordered by `resourceType` for
   deterministic iteration.
 
+## Scoped registry
+
+A `Scope` narrows which resources a Registry indexes. It is set on the
+Registry before any `Load*` call; a nil scope (the default) indexes
+everything, so existing code is unaffected.
+
+```go
+reg := fhir.NewRegistry()
+reg.Scope = fhir.NewScope().
+    WithResourceTypes("Patient", "Observation").
+    WithSearchParams(fhir.ScopeReferenced)
+reg.LoadPackageTgz("au-base.tgz")
+```
+
+Policies:
+
+- `ScopeAll` (default) - index everything in the category.
+- `ScopeReferenced` - index only resources in scope (e.g. SearchParameters
+  whose base type is in `ResourceTypes`, generic Resources whose type is in
+  `ResourceTypes`).
+- `ScopeNone` - skip the category entirely.
+
+For `ValueSets` and `CodeSystems`, `ScopeReferenced` is resolved in two passes:
+resources are buffered during loading, then `Resolve()` indexes only the ones
+referenced by in-scope StructureDefinitions (via element bindings) and
+transitively by other referenced ValueSets (via compose includes). Call
+`Resolve()` once after all packages are loaded:
+
+```go
+reg := fhir.NewRegistry()
+reg.Scope = fhir.NewScope().
+    WithResourceTypes("Patient").
+    WithValueSets(fhir.ScopeReferenced).
+    WithCodeSystems(fhir.ScopeReferenced)
+reg.LoadPackageTgz("au-base.tgz")
+reg.Resolve()
+```
+
+`ScopeFromCapabilityStatement` derives a scope from a CapabilityStatement,
+populating `ResourceTypes` and `Profiles` from its `rest[].resource[]` blocks
+and defaulting `SearchParams`, `GenericResources`, `ValueSets`, and
+`CodeSystems` to `ScopeReferenced`:
+
+```go
+reg := fhir.NewRegistry()
+reg.Scope = fhir.ScopeFromCapabilityStatement(reg.CapabilityStatements()[0])
+reg.LoadPackageWithDeps(ctx, pkgDir, client)
+reg.Resolve()
+```
+
 ## Key types
 
 - `ElementDefinition` - structural definition with typed `Max` cardinality, `Children` tree, and `Slices` grouping.
@@ -92,6 +143,8 @@ Each type also has a matching `Add*` method for programmatic registration
 - `StructureDefinition`, `ElementType`, `Binding`, `Slicing`, `Discriminator`, `ElementConstraint`.
 - `ValueSet`, `CodeSystem`, `CapabilityStatement`, `SearchParameter` - typed terminology/conformance resources.
 - `Resource` - opaque generic resource (`ResourceType`, `ProfileURLs`, `Raw`).
+- `Scope`, `ScopePolicy` - narrow which resources a Registry indexes.
+- `Registry.Resolve` - finalise a scoped Registry, indexing referenced ValueSets/CodeSystems.
 
 ## Errors
 

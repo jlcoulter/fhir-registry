@@ -386,21 +386,29 @@ type Registry struct {
 	searchParamIndex map[string]*SearchParameter
 	// resources indexes generic Resources by resource type.
 	resources map[string][]*Resource
-	// scope narrows which resources are indexed. A nil scope indexes
+	// pendingValueSets buffers ValueSets when ValueSets policy is
+	// ScopeReferenced, until Resolve is called.
+	pendingValueSets map[string]*ValueSet
+	// pendingCodeSystems buffers CodeSystems when CodeSystems policy is
+	// ScopeReferenced, until Resolve is called.
+	pendingCodeSystems map[string]*CodeSystem
+	// Scope narrows which resources are indexed. A nil Scope indexes
 	// everything. It must be set before any Load* call.
-	scope *Scope
+	Scope *Scope
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		byURL:            make(map[string]*StructureDefinition),
-		byType:           make(map[string][]*StructureDefinition),
-		trees:            make(map[string]*ElementTree),
-		valueSets:        make(map[string]*ValueSet),
-		codeSystems:      make(map[string]*CodeSystem),
-		searchParamIndex: make(map[string]*SearchParameter),
-		resources:        make(map[string][]*Resource),
+		byURL:              make(map[string]*StructureDefinition),
+		byType:             make(map[string][]*StructureDefinition),
+		trees:              make(map[string]*ElementTree),
+		valueSets:          make(map[string]*ValueSet),
+		codeSystems:        make(map[string]*CodeSystem),
+		searchParamIndex:   make(map[string]*SearchParameter),
+		resources:          make(map[string][]*Resource),
+		pendingValueSets:   make(map[string]*ValueSet),
+		pendingCodeSystems: make(map[string]*CodeSystem),
 	}
 }
 
@@ -490,7 +498,7 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if sd.URL == "" {
 			return nil
 		}
-		if r.scope != nil && !r.scope.AllowsStructureDefinition(&sd) {
+		if r.Scope != nil && !r.Scope.AllowsStructureDefinition(&sd) {
 			return nil
 		}
 		r.mu.Lock()
@@ -507,7 +515,13 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if vs.URL == "" {
 			return nil
 		}
-		if r.scope != nil && !r.scope.AllowsValueSet() {
+		if r.Scope != nil && r.Scope.ValueSets == ScopeReferenced {
+			r.mu.Lock()
+			r.pendingValueSets[vs.URL] = &vs
+			r.mu.Unlock()
+			return nil
+		}
+		if r.Scope != nil && !r.Scope.AllowsValueSet() {
 			return nil
 		}
 		r.mu.Lock()
@@ -521,7 +535,13 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if cs.URL == "" {
 			return nil
 		}
-		if r.scope != nil && !r.scope.AllowsCodeSystem() {
+		if r.Scope != nil && r.Scope.CodeSystems == ScopeReferenced {
+			r.mu.Lock()
+			r.pendingCodeSystems[cs.URL] = &cs
+			r.mu.Unlock()
+			return nil
+		}
+		if r.Scope != nil && !r.Scope.AllowsCodeSystem() {
 			return nil
 		}
 		r.mu.Lock()
@@ -532,7 +552,7 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if err := json.Unmarshal(data, &cs); err != nil {
 			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
 		}
-		if r.scope != nil && !r.scope.AllowsCapabilityStatement() {
+		if r.Scope != nil && !r.Scope.AllowsCapabilityStatement() {
 			return nil
 		}
 		r.mu.Lock()
@@ -543,7 +563,7 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if err := json.Unmarshal(data, &sp); err != nil {
 			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
 		}
-		if r.scope != nil && !r.scope.AllowsSearchParam(&sp) {
+		if r.Scope != nil && !r.Scope.AllowsSearchParam(&sp) {
 			return nil
 		}
 		r.mu.Lock()
@@ -561,7 +581,7 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if resourceType == "" {
 			return nil
 		}
-		if r.scope != nil && !r.scope.AllowsGenericResource(resourceType) {
+		if r.Scope != nil && !r.Scope.AllowsGenericResource(resourceType) {
 			return nil
 		}
 		res := &Resource{

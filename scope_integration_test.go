@@ -10,7 +10,7 @@ import (
 
 func TestLoadPackageTgzWithResourceTypesScope(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithResourceTypes("Patient")
+	reg.Scope = NewScope().WithResourceTypes("Patient")
 	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
 		t.Fatalf("LoadPackageTgz: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestLoadPackageTgzWithResourceTypesScope(t *testing.T) {
 
 func TestLoadPackageTgzWithScopeNoneCodeSystems(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithCodeSystems(ScopeNone)
+	reg.Scope = NewScope().WithCodeSystems(ScopeNone)
 	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
 		t.Fatalf("LoadPackageTgz: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestLoadPackageTgzWithScopeNoneCodeSystems(t *testing.T) {
 
 func TestLoadPackageTgzWithScopeReferencedSearchParams(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithResourceTypes("Patient").WithSearchParams(ScopeReferenced)
+	reg.Scope = NewScope().WithResourceTypes("Patient").WithSearchParams(ScopeReferenced)
 	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
 		t.Fatalf("LoadPackageTgz: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestLoadPackageTgzWithScopeReferencedSearchParams(t *testing.T) {
 
 func TestLoadPackageTgzWithScopeReferencedGenericResources(t *testing.T) {
 	reg := NewRegistry()
-	reg.scope = NewScope().WithResourceTypes("ImplementationGuide").WithGenericResources(ScopeReferenced)
+	reg.Scope = NewScope().WithResourceTypes("ImplementationGuide").WithGenericResources(ScopeReferenced)
 	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
 		t.Fatalf("LoadPackageTgz: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestLoadPackageTgzWithScopeFromCapabilityStatement(t *testing.T) {
 		},
 	}
 	reg := NewRegistry()
-	reg.scope = ScopeFromCapabilityStatement(cs)
+	reg.Scope = ScopeFromCapabilityStatement(cs)
 	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
 		t.Fatalf("LoadPackageTgz: %v", err)
 	}
@@ -146,5 +146,81 @@ func TestLoadPackageTgzWithScopeFromCapabilityStatement(t *testing.T) {
 	// Patient generic resources indexed (ScopeReferenced default).
 	if len(reg.ResourcesForType("Patient")) == 0 {
 		t.Error("Patient resources should be indexed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: ScopeReferenced ValueSets/CodeSystems via Resolve
+// ---------------------------------------------------------------------------
+
+func TestLoadPackageTgzWithScopeReferencedValueSets(t *testing.T) {
+	reg := NewRegistry()
+	reg.Scope = NewScope().WithResourceTypes("Location").WithValueSets(ScopeReferenced)
+	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
+		t.Fatalf("LoadPackageTgz: %v", err)
+	}
+	// Nothing indexed until Resolve is called.
+	if _, ok := reg.ValueSet("http://terminology.hl7.org.au/ValueSet/location-physical-type-extended"); ok {
+		t.Error("ValueSet should not be indexed before Resolve")
+	}
+	reg.Resolve()
+	// ValueSets referenced by the in-scope Location SD are indexed.
+	if _, ok := reg.ValueSet("http://terminology.hl7.org.au/ValueSet/location-physical-type-extended"); !ok {
+		t.Error("location-physical-type-extended should be indexed after Resolve")
+	}
+	if _, ok := reg.ValueSet("http://terminology.hl7.org.au/ValueSet/v3-ServiceDeliveryLocationRoleType-extended"); !ok {
+		t.Error("v3-ServiceDeliveryLocationRoleType-extended should be indexed after Resolve")
+	}
+	// A ValueSet not referenced by any in-scope SD is filtered out.
+	if _, ok := reg.ValueSet("http://terminology.hl7.org.au/ValueSet/accession-number-type"); ok {
+		t.Error("accession-number-type should be filtered out")
+	}
+}
+
+func TestLoadPackageTgzWithScopeReferencedCodeSystems(t *testing.T) {
+	reg := NewRegistry()
+	reg.Scope = NewScope().WithResourceTypes("Location").WithValueSets(ScopeReferenced).WithCodeSystems(ScopeReferenced)
+	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
+		t.Fatalf("LoadPackageTgz: %v", err)
+	}
+	reg.Resolve()
+	// CodeSystems referenced by in-scope ValueSets are indexed.
+	if _, ok := reg.CodeSystem("http://terminology.hl7.org.au/CodeSystem/location-physical-type"); !ok {
+		t.Error("location-physical-type CodeSystem should be indexed")
+	}
+	if _, ok := reg.CodeSystem("http://terminology.hl7.org.au/CodeSystem/location-type"); !ok {
+		t.Error("location-type CodeSystem should be indexed")
+	}
+	// A CodeSystem referenced only by an out-of-scope ValueSet is filtered out.
+	if _, ok := reg.CodeSystem("http://terminology.hl7.org.au/CodeSystem/contact-purpose"); ok {
+		t.Error("contact-purpose CodeSystem should be filtered out")
+	}
+}
+
+func TestLoadPackageTgzWithScopeFromCS_Resolved(t *testing.T) {
+	// A CS declaring support for Location only.
+	cs := &CapabilityStatement{
+		Rest: []CapabilityStatementRest{
+			{
+				Mode: "server",
+				Resource: []CapabilityStatementRestResource{
+					{Type: "Location"},
+				},
+			},
+		},
+	}
+	reg := NewRegistry()
+	reg.Scope = ScopeFromCapabilityStatement(cs)
+	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
+		t.Fatalf("LoadPackageTgz: %v", err)
+	}
+	reg.Resolve()
+	// ValueSets referenced by the in-scope Location SD are indexed.
+	if _, ok := reg.ValueSet("http://terminology.hl7.org.au/ValueSet/location-physical-type-extended"); !ok {
+		t.Error("location-physical-type-extended should be indexed")
+	}
+	// Unreferenced ValueSets are filtered out.
+	if _, ok := reg.ValueSet("http://terminology.hl7.org.au/ValueSet/accession-number-type"); ok {
+		t.Error("accession-number-type should be filtered out")
 	}
 }
