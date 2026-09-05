@@ -495,6 +495,39 @@ func TestBuildTreeDifferentialOnlyWithBase(t *testing.T) {
 	}
 }
 
+// TestNewStructureDefinition verifies that NewStructureDefinition builds a
+// definition whose snapshot round-trips the given elements through the tree.
+func TestNewStructureDefinition(t *testing.T) {
+	sd := NewStructureDefinition(
+		"http://example.org/StructureDefinition/foo",
+		"Foo",
+		"Foo",
+		"resource",
+		"",
+		"",
+		[]ElementDefinition{
+			{ID: "Foo", Path: "Foo", Min: 0, Max: 1},
+			{ID: "Foo.bar", Path: "Foo.bar", Min: 1, Max: MaxUnbounded, Types: []ElementType{{Code: "string"}}},
+		},
+	)
+	if sd.Snapshot == nil || len(sd.Snapshot.Elements) != 2 {
+		t.Fatalf("snapshot = %+v", sd.Snapshot)
+	}
+	tree, err := BuildTree(sd)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	if tree.Root == nil || tree.Root.Path != "Foo" {
+		t.Fatalf("root = %v", tree.Root)
+	}
+	if len(tree.Root.Children) != 1 || tree.Root.Children[0].Path != "Foo.bar" {
+		t.Fatalf("children = %+v", tree.Root.Children)
+	}
+	if tree.Root.Children[0].Max != MaxUnbounded {
+		t.Errorf("bar max = %v, want unbounded", tree.Root.Children[0].Max)
+	}
+}
+
 func TestBuildTreeElementsChildLinking(t *testing.T) {
 	sd := &StructureDefinition{ID: "link", Type: "Foo"}
 	raws := []RawElement{

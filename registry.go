@@ -160,6 +160,77 @@ type Snapshot struct {
 	Elements []RawElement `json:"element"`
 }
 
+// NewStructureDefinition builds a StructureDefinition whose snapshot is the
+// given flat element list. It is a convenience for constructing definitions
+// programmatically (e.g. in tests) from ElementDefinition values rather than
+// raw JSON. The returned definition's Snapshot is populated; Differential is
+// nil.
+func NewStructureDefinition(url, name, typ, kind, baseDefinition, derivation string, elements []ElementDefinition) *StructureDefinition {
+	raws := make([]RawElement, 0, len(elements))
+	for _, e := range elements {
+		raws = append(raws, rawElementFromDefinition(e))
+	}
+	return &StructureDefinition{
+		URL:            url,
+		Name:           name,
+		Type:           typ,
+		Kind:           kind,
+		BaseDefinition: baseDefinition,
+		Derivation:     derivation,
+		Snapshot:       &Snapshot{Elements: raws},
+	}
+}
+
+// rawElementFromDefinition converts an ElementDefinition back into its raw
+// JSON shape so it can be stored in a Snapshot.
+func rawElementFromDefinition(e ElementDefinition) RawElement {
+	min := e.Min
+	ms := e.MustSupport
+	raw := RawElement{
+		ID:            e.ID,
+		Path:          e.Path,
+		SliceName:     e.SliceName,
+		Short:         e.Short,
+		Definition:    e.Definition,
+		Comment:       e.Comment,
+		Min:           &min,
+		Max:           json.RawMessage(strconv.Quote(e.Max.String())),
+		MustSupport:   &ms,
+		Profile:       e.Profile,
+		TargetProfile: e.TargetProfile,
+		Fixed:         e.Fixed,
+		Pattern:       e.Pattern,
+		Examples:      e.Examples,
+	}
+	if e.BaseMax != nil {
+		raw.Base = &RawBase{Max: json.RawMessage(strconv.Quote(e.BaseMax.String()))}
+	}
+	for _, t := range e.Types {
+		raw.Types = append(raw.Types, RawType{
+			Code:          t.Code,
+			Profiles:      t.Profiles,
+			TargetProfile: t.TargetProfile,
+		})
+	}
+	if e.Binding != nil {
+		raw.Binding = &RawBinding{
+			Strength:    e.Binding.Strength,
+			Description: e.Binding.Description,
+			ValueSet:    e.Binding.ValueSet,
+		}
+	}
+	for _, c := range e.Constraints {
+		raw.Constraint = append(raw.Constraint, RawConstraint{
+			Key:        c.Key,
+			Severity:   c.Severity,
+			Human:      c.Human,
+			Expression: c.Expression,
+			Source:     c.Source,
+		})
+	}
+	return raw
+}
+
 type Differential struct {
 	Elements []RawElement `json:"element"`
 }
@@ -310,6 +381,11 @@ func ptrBool(b *bool) bool {
 }
 
 // convertRawElement converts a RawElement into a typed ElementDefinition.
+// ConvertElement converts a raw snapshot element into an ElementDefinition.
+func ConvertElement(raw RawElement) (ElementDefinition, error) {
+	return convertRawElement(raw)
+}
+
 func convertRawElement(raw RawElement) (ElementDefinition, error) {
 	maxVal, err := parseMax(raw.Max)
 	if err != nil {

@@ -251,6 +251,20 @@ func TestAddResourceNonResourceIgnored(t *testing.T) {
 // Add* methods
 // ---------------------------------------------------------------------------
 
+func TestAddStructureDefinition(t *testing.T) {
+	reg := NewRegistry()
+	sd := &StructureDefinition{URL: "http://example.org/StructureDefinition/foo", Type: "Patient"}
+	reg.AddStructureDefinition(sd)
+	got, ok := reg.Definition("http://example.org/StructureDefinition/foo")
+	if !ok || got != sd {
+		t.Errorf("Definition() = %v, %v; want same pointer, true", got, ok)
+	}
+	defs := reg.DefinitionsForType("Patient")
+	if len(defs) != 1 || defs[0] != sd {
+		t.Errorf("DefinitionsForType(Patient) = %v; want [sd]", defs)
+	}
+}
+
 func TestAddValueSet(t *testing.T) {
 	reg := NewRegistry()
 	vs := &ValueSet{URL: "http://example.org/ValueSet/vs", Status: "active"}

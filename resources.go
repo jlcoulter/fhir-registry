@@ -146,6 +146,24 @@ type Resource struct {
 // Registry methods
 // ---------------------------------------------------------------------------
 
+// AddStructureDefinition indexes a StructureDefinition by canonical URL and,
+// when it has a Type, by that resource type. It is the programmatic equivalent
+// of loading a StructureDefinition resource from a package.
+func (r *Registry) AddStructureDefinition(sd *StructureDefinition) {
+	if sd == nil || sd.URL == "" {
+		return
+	}
+	if r.Scope != nil && !r.Scope.AllowsStructureDefinition(sd) {
+		return
+	}
+	r.mu.Lock()
+	r.byURL[sd.URL] = sd
+	if sd.Type != "" {
+		r.byType[sd.Type] = append(r.byType[sd.Type], sd)
+	}
+	r.mu.Unlock()
+}
+
 // AddValueSet indexes a ValueSet by its canonical URL.
 func (r *Registry) AddValueSet(vs *ValueSet) {
 	r.mu.Lock()
