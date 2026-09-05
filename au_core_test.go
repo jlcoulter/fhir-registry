@@ -534,10 +534,9 @@ func TestLoadAuCoreDirectory(t *testing.T) {
 // Network: full dependency chain resolution
 // ---------------------------------------------------------------------------
 
-// TestLoadAuCoreWithDeps resolves the full parent dependency chain from
-// packages.fhir.org. au-core depends on au-base, which depends on R4 core and
-// terminology. We use au-base as the root because au-core pins au-base to
-// "current", which the client cannot resolve; au-base's deps are exact.
+// TestLoadAuCoreWithDeps resolves the full parent dependency chain from the
+// registry. au-core depends on au-base (pinned to "current", which the client
+// resolves via dist-tags), which depends on R4 core and terminology.
 func TestLoadAuCoreWithDeps(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network dependency resolution in -short mode")
@@ -549,9 +548,9 @@ func TestLoadAuCoreWithDeps(t *testing.T) {
 	client.CacheDir = t.TempDir() // isolate cache
 
 	pkgDir := t.TempDir()
-	f, err := os.Open("au-base.tgz")
+	f, err := os.Open("au-core.tgz")
 	if err != nil {
-		t.Fatalf("open au-base.tgz: %v", err)
+		t.Fatalf("open au-core.tgz: %v", err)
 	}
 	if err := extractTGZToDir(f, pkgDir); err != nil {
 		f.Close()
@@ -574,30 +573,25 @@ func TestLoadAuCoreWithDeps(t *testing.T) {
 	if _, ok := reg.Definition("http://hl7.org/fhir/StructureDefinition/Address"); !ok {
 		t.Error("base Address definition not resolved from R4 core")
 	}
-	// au-base profiles.
+	// au-base profiles (resolved via the "current" dependency).
 	if _, ok := reg.Definition("http://hl7.org.au/fhir/StructureDefinition/au-patient"); !ok {
 		t.Error("au-patient not resolved from au-base dependency")
+	}
+	// au-core profiles.
+	if _, ok := reg.Definition("http://hl7.org.au/fhir/core/StructureDefinition/au-core-patient"); !ok {
+		t.Error("au-core-patient not loaded")
 	}
 	// Terminology from hl7.terminology.r4.
 	if _, ok := reg.ValueSet("http://hl7.org/fhir/ValueSet/administrative-gender"); !ok {
 		t.Error("administrative-gender ValueSet not resolved from terminology dependency")
 	}
 	// Tree building works across the full chain.
-	tree, err := reg.Tree("http://hl7.org.au/fhir/StructureDefinition/au-patient")
+	tree, err := reg.Tree("http://hl7.org.au/fhir/core/StructureDefinition/au-core-patient")
 	if err != nil {
-		t.Fatalf("Tree(au-patient): %v", err)
+		t.Fatalf("Tree(au-core-patient): %v", err)
 	}
 	if tree.Root == nil || tree.Root.Path != "Patient" {
-		t.Errorf("au-patient tree root = %+v, want Patient", tree.Root)
-	}
-	// TreeForType prefers a derivation=="" definition; the R4 base Patient uses
-	// "specialization", so it returns the first Patient profile (au-patient).
-	tree, err = reg.TreeForType("Patient")
-	if err != nil {
-		t.Fatalf("TreeForType(Patient): %v", err)
-	}
-	if tree.SD.URL != "http://hl7.org.au/fhir/StructureDefinition/au-patient" {
-		t.Errorf("TreeForType(Patient) SD = %q, want au-patient", tree.SD.URL)
+		t.Errorf("au-core-patient tree root = %+v, want Patient", tree.Root)
 	}
 	// ResolveType with no profiles now resolves to the R4 base Patient.
 	if _, ok := reg.ResolveType("Patient", nil); !ok {

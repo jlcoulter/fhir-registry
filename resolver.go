@@ -113,16 +113,12 @@ func (r *Registry) loadPackageWithDeps(ctx context.Context, pkgDir string, clien
 
 	for _, depName := range names {
 		ref := m.Dependencies[depName]
-		version, err := client.ResolveVersion(ctx, depName, ref)
+		version, depDir, err := client.Download(ctx, depName, ref)
 		if err != nil {
-			return err
+			return fmt.Errorf("dependency %s#%s: %w", depName, ref, err)
 		}
 		if visited[depName+"#"+version] {
 			continue
-		}
-		depDir, err := client.Download(ctx, depName, version)
-		if err != nil {
-			return fmt.Errorf("dependency %s#%s: %w", depName, version, err)
 		}
 		if err := r.loadPackageWithDeps(ctx, depDir, client, visited); err != nil {
 			return fmt.Errorf("dependency %s#%s: %w", depName, version, err)

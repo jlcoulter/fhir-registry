@@ -1,3 +1,30 @@
+// Package fhir loads, indexes, and reasons about FHIR structure definitions.
+// It is the single source of truth for FHIR structure knowledge, designed to
+// handle arbitrary implementation guides.
+//
+// The central type is Registry, which indexes every StructureDefinition in a
+// set of FHIR packages by canonical URL and base type, and exposes the element
+// tree for each. Packages can be loaded from a directory or a .tgz archive,
+// and full dependency chains can be resolved from a registry server via
+// PackageClient.
+//
+// Beyond structure definitions, a Registry indexes terminology and conformance
+// resources (ValueSets, CodeSystems, CapabilityStatements, SearchParameters)
+// and any other resource type as an opaque Resource. A Scope narrows which
+// resources are indexed, e.g. to only what a package's CapabilityStatement
+// declares as supported.
+//
+// Typical usage:
+//
+//	reg := fhir.NewRegistry()
+//	if err := reg.LoadPackage("package"); err != nil {
+//	    log.Fatal(err)
+//	}
+//	tree, err := reg.Tree("http://hl7.org/fhir/StructureDefinition/Patient")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	out, report, err := reg.Marshal("Patient", instance)
 package fhir
 
 import (
@@ -414,7 +441,7 @@ func NewRegistry() *Registry {
 
 // LoadPackage loads every JSON resource in a directory (a FHIR package folder)
 // into the registry. Dependencies are NOT resolved; use LoadPackageWithDeps
-// for that.
+// for that. Non-JSON files and malformed resources are silently skipped.
 func (r *Registry) LoadPackage(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -615,7 +642,8 @@ func profileURLsOf(raw map[string]any) []string {
 	return urls
 }
 
-// Definition returns the StructureDefinition for a canonical URL.
+// Definition returns the StructureDefinition for a canonical URL. The bool
+// reports whether the definition was found.
 func (r *Registry) Definition(url string) (*StructureDefinition, bool) {
 	r.mu.RLock()
 	sd, ok := r.byURL[url]
@@ -624,6 +652,8 @@ func (r *Registry) Definition(url string) (*StructureDefinition, bool) {
 }
 
 // DefinitionsForType returns all definitions that profile the given base type.
+// The first entry is the base definition when the package ships it; otherwise
+// it is a profile.
 func (r *Registry) DefinitionsForType(typeName string) []*StructureDefinition {
 	r.mu.RLock()
 	defs := r.byType[typeName]
@@ -853,12 +883,20 @@ func parentIDOf(id string) string {
 // Cardinality helpers
 // ---------------------------------------------------------------------------
 
-func IsMulti(elem *ElementDefinition) bool    { return elem.Max.IsUnbounded() }
+// IsMulti reports whether the element has unbounded upper cardinality
+// (max = "*").
+func IsMulti(elem *ElementDefinition) bool { return elem.Max.IsUnbounded() }
+
+// IsRequired reports whether the element has a non-zero minimum cardinality.
 func IsRequired(elem *ElementDefinition) bool { return elem.Min > 0 }
+
+// Cardinality returns the FHIR cardinality string for the element, e.g. "0..*".
 func Cardinality(elem *ElementDefinition) string {
 	return fmt.Sprintf("%d..%s", elem.Min, elem.Max)
 }
 
+// PrimaryTypeCode returns the code of the element's first type choice, or the
+// empty string if the element has no types.
 func PrimaryTypeCode(elem *ElementDefinition) string {
 	if len(elem.Types) == 0 {
 		return ""

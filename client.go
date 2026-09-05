@@ -17,16 +17,13 @@ import (
 // PackageClient downloads FHIR packages from a registry server and caches
 // them locally in a FHIR-standard layout: <cacheDir>/<name>#<version>/package/.
 type PackageClient struct {
-	// RegistryURL is the package registry root, e.g. "https://packages.fhir.org".
-	RegistryURL string
-	// TarballURL is the base URL used to fetch tarballs. If empty it is derived
-	// from the metadata response (dist.tarball). Set to "https://packages.simplifier.net"
-	// to avoid a metadata round-trip for known versions.
-	TarballURL string
 	// CacheDir is where extracted packages are stored.
 	CacheDir string
 	// HTTPClient is the transport used for all requests.
 	HTTPClient *http.Client
+	// registryURLs are the package registry roots, tried in order. The first
+	// that returns usable metadata wins.
+	registryURLs []string
 }
 
 // NewPackageClient returns a client with sensible defaults. It returns an
@@ -38,10 +35,12 @@ func NewPackageClient() (*PackageClient, error) {
 		return nil, fmt.Errorf("resolving home directory: %w", err)
 	}
 	return &PackageClient{
-		RegistryURL: "https://packages.fhir.org",
-		TarballURL:  "https://packages.simplifier.net",
-		CacheDir:    filepath.Join(home, ".fhir", "packages"),
-		HTTPClient:  &http.Client{},
+		CacheDir:   filepath.Join(home, ".fhir", "packages"),
+		HTTPClient: &http.Client{},
+		registryURLs: []string{
+			"https://packages2.fhir.org/packages",
+			"https://packages.simplifier.net",
+		},
 	}, nil
 }
 
@@ -58,6 +57,7 @@ func (c *PackageClient) Cached(name, version string) bool {
 
 // metadata is the shape of the registry metadata response.
 type metadata struct {
+	DistTags map[string]string `json:"dist-tags"`
 	Versions map[string]struct {
 		Dist struct {
 			Tarball string `json:"tarball"`
@@ -65,42 +65,111 @@ type metadata struct {
 	} `json:"versions"`
 }
 
-// ResolveVersion resolves a version reference (exact, or a patch wildcard like
-// "4.0.x") to an exact available version by querying the registry.
-func (c *PackageClient) ResolveVersion(ctx context.Context, name, versionRef string) (string, error) {
-	if !strings.Contains(versionRef, "x") {
-		return versionRef, nil
+// isFloatingVersion reports whether a version reference is a floating tag
+// ("current", "latest", or "*") rather than a concrete version.
+func isFloatingVersion(version string) bool {
+	if version == "" {
+		return false
 	}
-	url := c.RegistryURL + "/" + name
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
+	v := strings.ToLower(strings.TrimSpace(version))
+	return v == "current" || v == "latest" || v == "*"
+}
+
+// floatingVersionTag maps a floating version reference to the dist-tag to look
+// up in registry metadata. "current" maps to "latest".
+func floatingVersionTag(version string) string {
+	v := strings.ToLower(strings.TrimSpace(version))
+	if v == "current" {
+		return "latest"
 	}
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("%w: querying registry for %s: %v", ErrNetwork, name, err)
+	return v
+}
+
+// resolveVersionAndTarball resolves a version reference (exact, a patch
+// wildcard like "4.0.x", or a floating tag like "current"/"latest") to an exact
+// version and its tarball URL by querying the registry. It tries each registry
+// URL in order until one returns usable metadata.
+func (c *PackageClient) resolveVersionAndTarball(ctx context.Context, name, versionRef string) (string, string, error) {
+	var errs []string
+	for _, baseURL := range c.registryURLs {
+		url := strings.TrimRight(baseURL, "/") + "/" + name
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return "", "", err
+		}
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", url, err))
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			errs = append(errs, fmt.Sprintf("%s: status %d", url, resp.StatusCode))
+			continue
+		}
+		var md metadata
+		if err := json.NewDecoder(resp.Body).Decode(&md); err != nil {
+			resp.Body.Close()
+			errs = append(errs, fmt.Sprintf("%s: %v", url, err))
+			continue
+		}
+		resp.Body.Close()
+
+		version, tarball, err := resolveVersionFromMetadata(name, versionRef, &md)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", url, err))
+			continue
+		}
+		return version, tarball, nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%w: querying registry for %s: status %d", ErrNetwork, name, resp.StatusCode)
-	}
-	var md metadata
-	if err := json.NewDecoder(resp.Body).Decode(&md); err != nil {
-		return "", fmt.Errorf("%w: decoding registry metadata for %s: %v", ErrParseFailure, name, err)
-	}
-	prefix := strings.TrimSuffix(versionRef, "x")
-	var best string
-	for v := range md.Versions {
-		if strings.HasPrefix(v, prefix) {
-			if best == "" || versionNewer(v, best) {
-				best = v
+	return "", "", fmt.Errorf("%w: resolving %s %q: %s", ErrVersionNotFound, name, versionRef, strings.Join(errs, "; "))
+}
+
+// resolveVersionFromMetadata resolves a version reference against a single
+// registry metadata document.
+func resolveVersionFromMetadata(name, versionRef string, md *metadata) (string, string, error) {
+	resolved := versionRef
+	if isFloatingVersion(versionRef) {
+		tag := floatingVersionTag(versionRef)
+		if v, ok := md.DistTags[tag]; ok && v != "" {
+			resolved = v
+		} else if v, ok := md.DistTags["latest"]; ok && v != "" {
+			resolved = v
+		} else {
+			return "", "", fmt.Errorf("floating version %q could not be resolved", versionRef)
+		}
+	} else if strings.Contains(versionRef, "x") {
+		prefix := strings.TrimSuffix(versionRef, "x")
+		var best string
+		for v := range md.Versions {
+			if strings.HasPrefix(v, prefix) {
+				if best == "" || versionNewer(v, best) {
+					best = v
+				}
 			}
 		}
+		if best == "" {
+			return "", "", fmt.Errorf("no version of %s matches %q", name, versionRef)
+		}
+		resolved = best
 	}
-	if best == "" {
-		return "", fmt.Errorf("%w: no version of %s matches %q", ErrVersionNotFound, name, versionRef)
+
+	vm, ok := md.Versions[resolved]
+	if !ok {
+		return "", "", fmt.Errorf("version %q not found in registry metadata", resolved)
 	}
-	return best, nil
+	if vm.Dist.Tarball == "" {
+		return "", "", fmt.Errorf("version %q missing dist.tarball", resolved)
+	}
+	return resolved, vm.Dist.Tarball, nil
+}
+
+// ResolveVersion resolves a version reference (exact, a patch wildcard like
+// "4.0.x", or a floating tag like "current"/"latest") to an exact available
+// version by querying the registry.
+func (c *PackageClient) ResolveVersion(ctx context.Context, name, versionRef string) (string, error) {
+	version, _, err := c.resolveVersionAndTarball(ctx, name, versionRef)
+	return version, err
 }
 
 // versionNewer compares two version strings, ignoring trailing labels
@@ -130,34 +199,39 @@ func versionParts(v string) [3]int {
 	return parts
 }
 
-// Download fetches and extracts a package by name and version into the cache.
-// It is a no-op if the package is already cached.
-func (c *PackageClient) Download(ctx context.Context, name, version string) (string, error) {
-	dir := c.PackageDir(name, version)
-	if c.Cached(name, version) {
-		return dir, nil
+// Download resolves a version reference (exact, wildcard, or floating) to an
+// exact version, fetches its tarball from the registry, and extracts it into
+// the cache. It returns the resolved version and the cache directory. It is a
+// no-op if the resolved package is already cached.
+func (c *PackageClient) Download(ctx context.Context, name, versionRef string) (resolvedVersion string, cacheDir string, err error) {
+	resolvedVersion, tarballURL, err := c.resolveVersionAndTarball(ctx, name, versionRef)
+	if err != nil {
+		return "", "", err
+	}
+	dir := c.PackageDir(name, resolvedVersion)
+	if c.Cached(name, resolvedVersion) {
+		return resolvedVersion, dir, nil
 	}
 	if err := os.MkdirAll(c.CacheDir, 0o755); err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	tarballURL := c.TarballURL + "/" + name + "/" + version
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tarballURL, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("%w: downloading %s#%s: %v", ErrNetwork, name, version, err)
+		return "", "", fmt.Errorf("%w: downloading %s#%s: %v", ErrNetwork, name, resolvedVersion, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%w: downloading %s#%s: status %d", ErrNetwork, name, version, resp.StatusCode)
+		return "", "", fmt.Errorf("%w: downloading %s#%s: status %d", ErrNetwork, name, resolvedVersion, resp.StatusCode)
 	}
 	if err := extractTGZToDir(resp.Body, dir); err != nil {
-		return "", fmt.Errorf("extracting %s#%s: %w", name, version, err)
+		return "", "", fmt.Errorf("extracting %s#%s: %w", name, resolvedVersion, err)
 	}
-	return dir, nil
+	return resolvedVersion, dir, nil
 }
 
 // extractTGZToDir extracts a gzipped tar stream to a destination directory,

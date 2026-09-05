@@ -1,0 +1,71 @@
+# fhir-registry
+
+> A Go library for loading, indexing, and reasoning about FHIR structure
+> definitions. It is the single source of truth for FHIR structure knowledge,
+> designed to handle arbitrary implementation guides.
+
+## Overview
+
+`fhir-registry` is a Go library (module `github.com/jlcoulter/fhir-registry`,
+package `fhir`) that loads FHIR packages, indexes their structure definitions
+and terminology/conformance resources, and exposes element trees for
+reasoning about and normalising FHIR instances.
+
+## Key types
+
+- `Registry` — concurrency-safe index of `StructureDefinition`s by canonical
+  URL and base type, with cached element trees. The central entry point.
+- `ElementTree` — recursively-linked element tree for one definition
+  (`SD`, `Root`, `ByPath`, `ByID`).
+- `ElementDefinition` — structural definition with typed `Max` cardinality,
+  `Children` tree, and `Slices` grouping.
+- `Max` — int type where `MaxUnbounded` represents `"*"`.
+- `PackageClient` — downloads FHIR packages from a registry server and caches
+  them locally.
+- `Scope` / `ScopePolicy` — narrow which resources a `Registry` indexes.
+- `ValueSet`, `CodeSystem`, `CapabilityStatement`, `SearchParameter` — typed
+  terminology/conformance resources.
+- `Resource` — opaque generic resource (`ResourceType`, `ProfileURLs`, `Raw`).
+- `MarshalReport` / `ReportItem` — diagnostics from `Registry.Marshal`.
+
+## Entry points
+
+- `NewRegistry()` — create a registry.
+- `Registry.LoadPackage(dir)` / `Registry.LoadPackageTgz(path)` — load a
+  package from a directory or `.tgz`.
+- `Registry.LoadPackageWithDeps(ctx, dir, client)` — load a package and resolve
+  its dependency chain.
+- `Registry.Tree(url)` / `Registry.TreeForType(type)` — build an element tree.
+- `Registry.Marshal(resourceType, instance)` — normalize an instance.
+- `Registry.Definition(url)` / `Registry.DefinitionsForType(type)` — look up
+  definitions.
+- `Registry.Resolve()` — finalize a scoped registry.
+- `MergeDifferential(base, differential)` — merge a differential onto a base
+  snapshot.
+- Cardinality helpers: `IsMulti`, `IsRequired`, `Cardinality`,
+  `PrimaryTypeCode`, `IsChoice`, `ChoiceName`.
+
+## Errors
+
+Sentinel errors (`ErrDefinitionNotFound`, `ErrBaseDefinition`,
+`ErrIncompleteDefinition`, `ErrPackageNotFound`, `ErrVersionNotFound`,
+`ErrNetwork`, `ErrParseFailure`) are returned wrapped and usable with
+`errors.Is`.
+
+## Source layout
+
+- `registry.go` — `Registry`, element trees, cardinality helpers
+- `client.go` — `PackageClient`
+- `resolver.go` — package loading and dependency resolution
+- `scope.go` — `Scope`
+- `resources.go` — terminology and conformance resource types
+- `marshal.go` — instance normalization
+- `merge.go` — differential-to-snapshot merging
+- `errors.go` — sentinel errors
+
+## Documentation
+
+- README: [README.md](README.md)
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- License: Apache-2.0 ([LICENSE](LICENSE))

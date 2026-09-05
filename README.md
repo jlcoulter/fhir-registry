@@ -1,19 +1,16 @@
 # fhir-registry
 
+[![Go Version](https://img.shields.io/github/go-mod/go-version/jlcoulter/fhir-registry)](https://go.dev/)
+[![License](https://img.shields.io/github/license/jlcoulter/fhir-registry)](./LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/jlcoulter/fhir-registry.svg)](https://pkg.go.dev/github.com/jlcoulter/fhir-registry)
+
 A Go library for loading, indexing, and reasoning about FHIR structure definitions. It is the single source of truth for FHIR structure knowledge, designed to handle arbitrary implementation guides.
 
-## Features
+## Getting started
 
-- **Registry** -  concurrency-safe index of StructureDefinitions by canonical URL and base type, with cached element trees.
-- **Element trees** - build recursively-linked trees from snapshots or differentials, with slice handling and path/ID lookup.
-- **Differential merging** - `MergeDifferential` overlays a profile's differential onto its base snapshot.
-- **Package loading** - load FHIR packages from a directory or `.tgz`, and resolve full dependency chains from a registry server with caching.
-- **Marshal** - normalise instance resources against type trees (array/scalar wrapping, choice elements, cardinality checks).
-- **Cardinality helpers** - `IsMulti`, `IsRequired`, `Cardinality`, `PrimaryTypeCode`, `IsChoice`, `ChoiceName`.
-- **Terminology & conformance resources** - index ValueSets, CodeSystems, CapabilityStatements, and SearchParameters from packages, plus any other resource type as an opaque `Resource`.
-- **Scoped registry** - narrow which resources a Registry indexes, e.g. to only what a package's CapabilityStatement declares as supported.
-
-## Usage
+```sh
+go get github.com/jlcoulter/fhir-registry
+```
 
 ```go
 reg := fhir.NewRegistry()
@@ -27,6 +24,19 @@ if err != nil {
 }
 // tree.Root, tree.ByPath, tree.ByID
 ```
+
+## Features
+
+- **Registry** -  concurrency-safe index of StructureDefinitions by canonical URL and base type, with cached element trees.
+- **Element trees** - build recursively-linked trees from snapshots or differentials, with slice handling and path/ID lookup.
+- **Differential merging** - `MergeDifferential` overlays a profile's differential onto its base snapshot.
+- **Package loading** - load FHIR packages from a directory or `.tgz`, and resolve full dependency chains from a registry server with caching.
+- **Marshal** - normalise instance resources against type trees (array/scalar wrapping, choice elements, cardinality checks).
+- **Cardinality helpers** - `IsMulti`, `IsRequired`, `Cardinality`, `PrimaryTypeCode`, `IsChoice`, `ChoiceName`.
+- **Terminology & conformance resources** - index ValueSets, CodeSystems, CapabilityStatements, and SearchParameters from packages, plus any other resource type as an opaque `Resource`.
+- **Scoped registry** - narrow which resources a Registry indexes, e.g. to only what a package's CapabilityStatement declares as supported.
+
+## Usage
 
 Load a package with dependencies:
 
@@ -149,3 +159,12 @@ reg.Resolve()
 ## Errors
 
 Sentinel errors (`ErrDefinitionNotFound`, `ErrBaseDefinition`, `ErrIncompleteDefinition`, `ErrPackageNotFound`, `ErrVersionNotFound`, `ErrNetwork`, `ErrParseFailure`) are returned wrapped and usable with `errors.Is`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, conventions, and the pull
+request process. Changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[Apache-2.0](LICENSE)

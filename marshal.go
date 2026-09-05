@@ -9,19 +9,26 @@ import (
 type Severity string
 
 const (
+	// SeverityViolation marks a cardinality or structural violation that
+	// should be fixed.
 	SeverityViolation Severity = "violation"
-	SeverityWarning   Severity = "warning"
+	// SeverityWarning marks a non-fatal issue, such as an unknown key.
+	SeverityWarning Severity = "warning"
 )
 
 // ReportItem describes a problem found while marshaling.
 type ReportItem struct {
-	Path     string
+	// Path is the element path (e.g. "Patient.name") the problem relates to.
+	Path string
+	// Severity is either SeverityViolation or SeverityWarning.
 	Severity Severity
-	Message  string
+	// Message is a human-readable description of the problem.
+	Message string
 }
 
 // MarshalReport collects diagnostics from a Marshal call.
 type MarshalReport struct {
+	// Items holds the problems found, in the order they were encountered.
 	Items []ReportItem
 }
 
