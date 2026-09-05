@@ -30,4 +30,8 @@ var (
 
 	// ErrParseFailure is returned when a FHIR resource cannot be parsed.
 	ErrParseFailure = errors.New("fhir: parse failure")
+
+	// ErrPathNotFound is returned when an element path cannot be resolved
+	// against an element tree.
+	ErrPathNotFound = errors.New("fhir: element path not found")
 )

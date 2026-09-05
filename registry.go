@@ -506,6 +506,11 @@ type ElementTree struct {
 	Root   *ElementDefinition
 	ByPath map[string][]*ElementDefinition
 	ByID   map[string]*ElementDefinition
+
+	// reg is the registry that produced this tree, used to resolve nested
+	// complex-type children (e.g. Patient.name.family) that live in other
+	// structure definitions.
+	reg *Registry
 }
 
 // addResource dispatches a raw JSON resource into the registry.
@@ -698,6 +703,7 @@ func (r *Registry) Tree(url string) (*ElementTree, error) {
 	if err != nil {
 		return nil, err
 	}
+	t.reg = r
 	r.trees[url] = t
 	return t, nil
 }
@@ -922,4 +928,81 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// LookupPath resolves a relative element path (e.g. "name.family",
+// "birthDate") against the tree, returning the matching element definition.
+// The path is relative to the resource root (the tree's Root.Path). An empty
+// path returns the root element. A concrete type-suffixed key of a choice
+// element (e.g. "deceasedBoolean" for "deceased[x]") resolves to the choice
+// element itself. Nested complex-type children (e.g. "name.family") are
+// resolved through the registry. It returns ErrPathNotFound when the path does
+// not exist.
+func (t *ElementTree) LookupPath(relPath string) (*ElementDefinition, error) {
+	if relPath == "" {
+		return t.Root, nil
+	}
+	segs := strings.Split(relPath, ".")
+	cur := t.Root
+	for i, seg := range segs {
+		last := i == len(segs)-1
+		child, ok := t.child(cur, seg)
+		if !ok {
+			// The segment may be a concrete type-suffixed key of a choice
+			// element (e.g. "deceasedBoolean" for "deceased[x]").
+			if last {
+				if choice, ok := t.choiceFor(cur, seg); ok {
+					return choice, nil
+				}
+			}
+			return nil, fmt.Errorf("%w: %s", ErrPathNotFound, relPath)
+		}
+		if last {
+			return child, nil
+		}
+		cur = child
+	}
+	return nil, fmt.Errorf("%w: %s", ErrPathNotFound, relPath)
+}
+
+// child returns the direct child element of elem whose last path segment
+// matches seg, resolving complex-type children through the registry when the
+// element has no in-tree children.
+func (t *ElementTree) child(elem *ElementDefinition, seg string) (*ElementDefinition, bool) {
+	children := elem.Children
+	if len(children) == 0 && t.reg != nil {
+		if resolved, ok := t.reg.ResolveType(PrimaryTypeCode(elem), profilesOf(elem)); ok {
+			children = resolved.Root.Children
+		}
+	}
+	for _, c := range children {
+		if lastSegment(c.Path) == seg {
+			return c, true
+		}
+	}
+	return nil, false
+}
+
+// choiceFor returns the choice element under elem whose concrete type-suffixed
+// key matches seg (e.g. seg "deceasedBoolean" matches the "deceased[x]" choice
+// with a boolean type).
+func (t *ElementTree) choiceFor(elem *ElementDefinition, seg string) (*ElementDefinition, bool) {
+	children := elem.Children
+	if len(children) == 0 && t.reg != nil {
+		if resolved, ok := t.reg.ResolveType(PrimaryTypeCode(elem), profilesOf(elem)); ok {
+			children = resolved.Root.Children
+		}
+	}
+	for _, c := range children {
+		if !IsChoice(c) {
+			continue
+		}
+		base := strings.TrimSuffix(lastSegment(c.Path), "[x]")
+		for _, ty := range c.Types {
+			if base+capitalize(ty.Code) == seg {
+				return c, true
+			}
+		}
+	}
+	return nil, false
 }

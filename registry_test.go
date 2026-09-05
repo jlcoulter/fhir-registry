@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"reflect"
@@ -600,6 +601,105 @@ func TestChoiceName(t *testing.T) {
 	}
 	if got := ChoiceName(elem, "dateTime"); got != "deceasedDateTime" {
 		t.Errorf("ChoiceName(dateTime) = %s", got)
+	}
+}
+
+// TestLookupPathExact verifies that LookupPath resolves a top-level relative
+// path to its element definition.
+func TestLookupPathExact(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("birthDate")
+	if err != nil {
+		t.Fatalf("LookupPath(birthDate): %v", err)
+	}
+	if elem.Path != "Patient.birthDate" {
+		t.Errorf("elem.Path = %q, want Patient.birthDate", elem.Path)
+	}
+}
+
+// TestLookupPathNested verifies that LookupPath resolves a nested relative
+// path (e.g. address.city) to its element definition, resolving the complex
+// type through the registry.
+func TestLookupPathNested(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("address.city")
+	if err != nil {
+		t.Fatalf("LookupPath(address.city): %v", err)
+	}
+	if elem.Path != "Address.city" {
+		t.Errorf("elem.Path = %q, want Address.city", elem.Path)
+	}
+}
+
+// TestLookupPathNotFound verifies that LookupPath returns ErrPathNotFound for
+// an unknown relative path.
+func TestLookupPathNotFound(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	if _, err := tree.LookupPath("nonexistent"); !errors.Is(err, ErrPathNotFound) {
+		t.Errorf("LookupPath(nonexistent) err = %v, want ErrPathNotFound", err)
+	}
+}
+
+// TestLookupPathChoiceConcrete verifies that LookupPath resolves a concrete
+// type-suffixed key (e.g. deceasedBoolean) to the underlying choice element.
+func TestLookupPathChoiceConcrete(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("deceasedBoolean")
+	if err != nil {
+		t.Fatalf("LookupPath(deceasedBoolean): %v", err)
+	}
+	if elem.Path != "Patient.deceased[x]" {
+		t.Errorf("elem.Path = %q, want Patient.deceased[x]", elem.Path)
+	}
+}
+
+// TestLookupPathChoiceUnsuffixed verifies that LookupPath resolves the
+// unsuffixed choice path (e.g. deceased[x]) directly.
+func TestLookupPathChoiceUnsuffixed(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("deceased[x]")
+	if err != nil {
+		t.Fatalf("LookupPath(deceased[x]): %v", err)
+	}
+	if elem.Path != "Patient.deceased[x]" {
+		t.Errorf("elem.Path = %q, want Patient.deceased[x]", elem.Path)
+	}
+}
+
+// TestLookupPathResourceRoot verifies that LookupPath with an empty path
+// returns the tree root.
+func TestLookupPathResourceRoot(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("")
+	if err != nil {
+		t.Fatalf("LookupPath(\"\"): %v", err)
+	}
+	if elem != tree.Root {
+		t.Errorf("LookupPath(\"\") did not return the tree root")
 	}
 }
 
