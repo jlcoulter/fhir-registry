@@ -1,0 +1,598 @@
+package fhir
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// Max represents the upper bound of an element's cardinality. A value of
+// MaxUnbounded corresponds to the FHIR "*" (no upper limit).
+type Max int
+
+// MaxUnbounded represents unbounded cardinality (*).
+// Cardinality [0..1] → Min=0, Max=1; [0..*] → Min=0, Max=MaxUnbounded.
+const MaxUnbounded Max = -1
+
+// IsUnbounded reports whether the max is "*".
+func (m Max) IsUnbounded() bool { return m == MaxUnbounded }
+
+// String returns the FHIR "max" representation: "*" or the numeric value.
+func (m Max) String() string {
+	if m == MaxUnbounded {
+		return "*"
+	}
+	return strconv.Itoa(int(m))
+}
+
+// ElementDefinition captures the structural definition of a FHIR element.
+// Children holds direct sub-elements, forming a tree rooted at the resource type.
+type ElementDefinition struct {
+	ID                 string               `json:"id"`
+	Path               string               `json:"path"`
+	SliceName          string               `json:"sliceName,omitempty"`
+	Short              string               `json:"short,omitempty"`
+	Definition         string               `json:"definition,omitempty"`
+	Comment            string               `json:"comment,omitempty"`
+	Min                int                  `json:"min"`
+	Max                Max                  `json:"max"` // MaxUnbounded represents "*"
+	Types              []ElementType        `json:"types,omitempty"`
+	IsModifier         bool                 `json:"isModifier"`
+	IsSummary          bool                 `json:"isSummary"`
+	Binding            *Binding             `json:"binding,omitempty"`
+	Condition          []string             `json:"condition,omitempty"`
+	MeaningWhenMissing string               `json:"meaningWhenMissing,omitempty"`
+	ContentReference   string               `json:"contentReference,omitempty"`
+	Slicing            *Slicing             `json:"slicing,omitempty"`
+	Children           []*ElementDefinition `json:"children,omitempty"`
+}
+
+// ElementType represents a single type choice for a FHIR element.
+type ElementType struct {
+	Code          string   `json:"code"`
+	Profiles      []string `json:"profiles,omitempty"`
+	TargetProfile []string `json:"targetProfiles,omitempty"`
+}
+
+// Binding describes the value set binding for a coded element.
+type Binding struct {
+	Strength    string `json:"strength"`
+	Description string `json:"description,omitempty"`
+	ValueSet    string `json:"valueSet,omitempty"`
+}
+
+// Slicing describes how a repeating element is sliced.
+type Slicing struct {
+	Discriminator []Discriminator `json:"discriminator,omitempty"`
+	Rules         string          `json:"rules,omitempty"`
+	Ordered       bool            `json:"ordered,omitempty"`
+}
+
+// Discriminator identifies how slices are told apart.
+type Discriminator struct {
+	Type string `json:"type"`
+	Path string `json:"path"`
+}
+
+// ---------------------------------------------------------------------------
+// Raw JSON types — the snapshot/differential in the JSON file is a flat list
+// of elements with dot-separated paths. These structs match that shape.
+// ---------------------------------------------------------------------------
+
+type StructureDefinition struct {
+	ResourceType   string        `json:"resourceType"`
+	ID             string        `json:"id"`
+	URL            string        `json:"url"`
+	Name           string        `json:"name"`
+	Title          string        `json:"title,omitempty"`
+	Status         string        `json:"status"`
+	Kind           string        `json:"kind"`
+	Abstract       bool          `json:"abstract"`
+	Type           string        `json:"type"`
+	BaseDefinition string        `json:"baseDefinition,omitempty"`
+	Derivation     string        `json:"derivation,omitempty"`
+	Snapshot       *Snapshot     `json:"snapshot,omitempty"`
+	Differential   *Differential `json:"differential,omitempty"`
+}
+
+type Snapshot struct {
+	Elements []RawElement `json:"element"`
+}
+
+type Differential struct {
+	Elements []RawElement `json:"element"`
+}
+
+// RawElement is the flat JSON shape from the StructureDefinition file.
+// The "max" field comes as a string ("1", "*", "0") so it needs custom parsing.
+type RawElement struct {
+	ID                 string          `json:"id"`
+	Path               string          `json:"path"`
+	SliceName          string          `json:"sliceName,omitempty"`
+	Short              string          `json:"short,omitempty"`
+	Definition         string          `json:"definition,omitempty"`
+	Comment            string          `json:"comment,omitempty"`
+	Min                *int            `json:"min"`
+	Max                json.RawMessage `json:"max"`
+	Types              []RawType       `json:"type,omitempty"`
+	IsModifier         *bool           `json:"isModifier"`
+	IsSummary          *bool           `json:"isSummary"`
+	Binding            *RawBinding     `json:"binding,omitempty"`
+	Condition          []string        `json:"condition,omitempty"`
+	MeaningWhenMissing string          `json:"meaningWhenMissing,omitempty"`
+	ContentReference   string          `json:"contentReference,omitempty"`
+	Slicing            *Slicing        `json:"slicing,omitempty"`
+}
+
+type RawType struct {
+	Code          string   `json:"code"`
+	Profiles      []string `json:"profile,omitempty"`
+	TargetProfile []string `json:"targetProfile,omitempty"`
+}
+
+type RawBinding struct {
+	Strength    string `json:"strength"`
+	Description string `json:"description,omitempty"`
+	ValueSet    string `json:"valueSet,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+// parseMax converts a FHIR "max" value to a Max.
+// "*" → MaxUnbounded, numeric strings like "1" → 1, "0" → 0.
+func parseMax(raw json.RawMessage) (Max, error) {
+	if len(raw) == 0 {
+		return 1, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if s == "*" {
+			return MaxUnbounded, nil
+		}
+		var n int
+		if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+			return 0, fmt.Errorf("cannot parse max value %q: %w", s, err)
+		}
+		return Max(n), nil
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return Max(n), nil
+	}
+	return 0, fmt.Errorf("cannot parse max value: %s", string(raw))
+}
+
+// ptrBool dereferences a *bool, defaulting to false when nil.
+func ptrBool(b *bool) bool {
+	if b == nil {
+		return false
+	}
+	return *b
+}
+
+// convertRawElement converts a RawElement into a typed ElementDefinition.
+func convertRawElement(raw RawElement) (ElementDefinition, error) {
+	maxVal, err := parseMax(raw.Max)
+	if err != nil {
+		return ElementDefinition{}, fmt.Errorf("element %q: %w", raw.Path, err)
+	}
+
+	types := make([]ElementType, 0, len(raw.Types))
+	for _, rt := range raw.Types {
+		types = append(types, ElementType{
+			Code:          rt.Code,
+			Profiles:      rt.Profiles,
+			TargetProfile: rt.TargetProfile,
+		})
+	}
+
+	var binding *Binding
+	if raw.Binding != nil {
+		binding = &Binding{
+			Strength:    raw.Binding.Strength,
+			Description: raw.Binding.Description,
+			ValueSet:    raw.Binding.ValueSet,
+		}
+	}
+
+	var min int
+	if raw.Min != nil {
+		min = *raw.Min
+	}
+
+	return ElementDefinition{
+		ID:                 raw.ID,
+		Path:               raw.Path,
+		SliceName:          raw.SliceName,
+		Short:              raw.Short,
+		Definition:         raw.Definition,
+		Comment:            raw.Comment,
+		Min:                min,
+		Max:                maxVal,
+		Types:              types,
+		IsModifier:         ptrBool(raw.IsModifier),
+		IsSummary:          ptrBool(raw.IsSummary),
+		Binding:            binding,
+		Condition:          raw.Condition,
+		MeaningWhenMissing: raw.MeaningWhenMissing,
+		ContentReference:   raw.ContentReference,
+		Slicing:            raw.Slicing,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+// Registry indexes every StructureDefinition in a set of FHIR packages by
+// canonical URL and by base type, and exposes the element tree for each.
+type Registry struct {
+	mu sync.RWMutex
+	// byURL maps a canonical StructureDefinition URL to its definition.
+	byURL map[string]*StructureDefinition
+	// byType maps a base type name (e.g. "Patient", "Identifier") to the
+	// definitions that profile it. The first entry is the base definition
+	// when the package ships it; otherwise it is a profile.
+	byType map[string][]*StructureDefinition
+	// trees caches the built element tree per canonical URL.
+	trees map[string]*ElementTree
+}
+
+// NewRegistry returns an empty registry.
+func NewRegistry() *Registry {
+	return &Registry{
+		byURL:  make(map[string]*StructureDefinition),
+		byType: make(map[string][]*StructureDefinition),
+		trees:  make(map[string]*ElementTree),
+	}
+}
+
+// LoadPackage loads every JSON resource in a directory (a FHIR package folder)
+// into the registry. Dependencies are NOT resolved; use LoadPackageWithDeps
+// for that.
+func (r *Registry) LoadPackage(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("%w: reading package dir %s: %v", ErrPackageNotFound, dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return fmt.Errorf("%w: reading %s: %v", ErrPackageNotFound, e.Name(), err)
+		}
+		if err := r.addResource(e.Name(), data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LoadPackageTgz loads a FHIR package distributed as a .tgz archive into the
+// registry.
+func (r *Registry) LoadPackageTgz(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("%w: opening %s: %v", ErrPackageNotFound, path, err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("%w: gzip %s: %v", ErrPackageNotFound, path, err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("%w: tar %s: %v", ErrPackageNotFound, path, err)
+		}
+		if hdr.Typeflag != tar.TypeReg || !strings.HasSuffix(hdr.Name, ".json") {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return fmt.Errorf("%w: reading %s: %v", ErrPackageNotFound, hdr.Name, err)
+		}
+		if err := r.addResource(hdr.Name, data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ElementTree is the recursively-linked element tree for one StructureDefinition.
+type ElementTree struct {
+	SD     *StructureDefinition
+	Root   *ElementDefinition
+	ByPath map[string][]*ElementDefinition
+	ByID   map[string]*ElementDefinition
+}
+
+// addResource dispatches a raw JSON resource into the registry.
+func (r *Registry) addResource(name string, data []byte) error {
+	var head struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil || head.ResourceType == "" {
+		return nil // package.json, .index.json, etc.
+	}
+	if head.ResourceType != "StructureDefinition" {
+		return nil
+	}
+	var sd StructureDefinition
+	if err := json.Unmarshal(data, &sd); err != nil {
+		return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+	}
+	if sd.URL == "" {
+		return nil
+	}
+	r.mu.Lock()
+	r.byURL[sd.URL] = &sd
+	if sd.Type != "" {
+		r.byType[sd.Type] = append(r.byType[sd.Type], &sd)
+	}
+	r.mu.Unlock()
+	return nil
+}
+
+// Definition returns the StructureDefinition for a canonical URL.
+func (r *Registry) Definition(url string) (*StructureDefinition, bool) {
+	r.mu.RLock()
+	sd, ok := r.byURL[url]
+	r.mu.RUnlock()
+	return sd, ok
+}
+
+// DefinitionsForType returns all definitions that profile the given base type.
+func (r *Registry) DefinitionsForType(typeName string) []*StructureDefinition {
+	r.mu.RLock()
+	defs := r.byType[typeName]
+	r.mu.RUnlock()
+	return defs
+}
+
+// Tree builds (and caches) the element tree for a canonical URL. For a
+// profile that has only a differential, the base definition is resolved from
+// the registry and the differential is merged onto its snapshot.
+func (r *Registry) Tree(url string) (*ElementTree, error) {
+	r.mu.RLock()
+	if t, ok := r.trees[url]; ok {
+		r.mu.RUnlock()
+		return t, nil
+	}
+	r.mu.RUnlock()
+
+	// Build under the write lock so byURL reads and the cache store are
+	// atomic with respect to addResource, which also takes the write lock.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Another goroutine may have built it while we waited for the lock.
+	if t, ok := r.trees[url]; ok {
+		return t, nil
+	}
+
+	sd, ok := r.byURL[url]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrDefinitionNotFound, url)
+	}
+
+	// Ensure the definition has a complete element list, merging the
+	// differential onto the base snapshot when necessary.
+	raws, err := r.ensureSnapshot(sd)
+	if err != nil {
+		return nil, err
+	}
+
+	t, err := BuildTreeElements(sd, raws)
+	if err != nil {
+		return nil, err
+	}
+	r.trees[url] = t
+	return t, nil
+}
+
+// ensureSnapshot returns a complete element list for a definition, merging the
+// differential onto the base snapshot when the definition has no snapshot.
+func (r *Registry) ensureSnapshot(sd *StructureDefinition) ([]RawElement, error) {
+	if sd.Snapshot != nil && len(sd.Snapshot.Elements) > 0 {
+		return sd.Snapshot.Elements, nil
+	}
+	if sd.Differential == nil || len(sd.Differential.Elements) == 0 {
+		return nil, fmt.Errorf("%w: %s", ErrIncompleteDefinition, sd.ID)
+	}
+	baseURL := stripVersion(sd.BaseDefinition)
+	base, ok := r.byURL[baseURL]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q for %s", ErrBaseDefinition, baseURL, sd.ID)
+	}
+	baseRaw, err := r.ensureSnapshot(base)
+	if err != nil {
+		return nil, err
+	}
+	return MergeDifferential(baseRaw, sd.Differential.Elements), nil
+}
+
+// stripVersion removes a "|version" suffix from a canonical URL.
+func stripVersion(url string) string {
+	if i := strings.LastIndex(url, "|"); i >= 0 {
+		return url[:i]
+	}
+	return url
+}
+
+// TreeForType returns the element tree for a base type name, preferring the
+// base definition when present and otherwise the first profile.
+func (r *Registry) TreeForType(typeName string) (*ElementTree, error) {
+	r.mu.RLock()
+	defs := r.byType[typeName]
+	r.mu.RUnlock()
+	if len(defs) == 0 {
+		return nil, fmt.Errorf("%w: type %s", ErrDefinitionNotFound, typeName)
+	}
+	// Prefer the base definition (derivation empty) over profiles.
+	sorted := make([]*StructureDefinition, len(defs))
+	copy(sorted, defs)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Derivation == "" && sorted[j].Derivation != ""
+	})
+	return r.Tree(sorted[0].URL)
+}
+
+// ResolveType returns the element tree for a type reference. Profiles are
+// tried first (in order), then the type's base definition URL, then a unique
+// profile for the type if one exists.
+func (r *Registry) ResolveType(typeCode string, profiles []string) (*ElementTree, bool) {
+	for _, p := range profiles {
+		if t, err := r.Tree(stripVersion(p)); err == nil {
+			return t, true
+		}
+	}
+	base := "http://hl7.org/fhir/StructureDefinition/" + typeCode
+	if t, err := r.Tree(base); err == nil {
+		return t, true
+	}
+	defs := r.DefinitionsForType(typeCode)
+	if len(defs) == 1 {
+		if t, err := r.Tree(defs[0].URL); err == nil {
+			return t, true
+		}
+	}
+	return nil, false
+}
+
+// ---------------------------------------------------------------------------
+// Tree building
+// ---------------------------------------------------------------------------
+
+// BuildTree links a flat snapshot/differential element list into a tree.
+// Elements are keyed by their unique id (which carries slice names), so
+// sliced elements sharing a path do not collide.
+//
+// A differential-only definition that derives from a base cannot be turned
+// into a complete tree here: resolving it requires the base snapshot, which
+// only a Registry can provide. Callers in that situation should use
+// Registry.Tree instead.
+func BuildTree(sd *StructureDefinition) (*ElementTree, error) {
+	var raws []RawElement
+	if sd.Snapshot != nil && len(sd.Snapshot.Elements) > 0 {
+		raws = sd.Snapshot.Elements
+	} else if sd.Differential != nil {
+		if sd.BaseDefinition != "" {
+			return nil, fmt.Errorf("%w: %s has only a differential and a base definition; use Registry.Tree to resolve the base snapshot", ErrIncompleteDefinition, sd.ID)
+		}
+		raws = sd.Differential.Elements
+	}
+	if len(raws) == 0 {
+		return nil, fmt.Errorf("%w: %s has no snapshot or differential elements", ErrIncompleteDefinition, sd.ID)
+	}
+	return BuildTreeElements(sd, raws)
+}
+
+// BuildTreeElements links a complete element list into a tree.
+func BuildTreeElements(sd *StructureDefinition, raws []RawElement) (*ElementTree, error) {
+	all := make([]ElementDefinition, 0, len(raws))
+	byID := make(map[string]*ElementDefinition, len(raws))
+	for _, raw := range raws {
+		elem, err := convertRawElement(raw)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, elem)
+		byID[elem.ID] = &all[len(all)-1]
+	}
+
+	// Link children by id prefix: a child's id is its parent's id plus a
+	// "." segment or a ":" slice suffix.
+	for i := range all {
+		elem := &all[i]
+		parentID := parentIDOf(elem.ID)
+		if parentID == "" {
+			continue // root
+		}
+		if parent, ok := byID[parentID]; ok {
+			parent.Children = append(parent.Children, elem)
+		}
+	}
+
+	root := byID[sd.Type]
+	if root == nil {
+		// Fall back to the first element (the root of the snapshot).
+		root = &all[0]
+	}
+
+	// Build the path map (a path may map to several sliced elements).
+	byPath := make(map[string][]*ElementDefinition)
+	for i := range all {
+		elem := &all[i]
+		byPath[elem.Path] = append(byPath[elem.Path], elem)
+	}
+
+	return &ElementTree{SD: sd, Root: root, ByPath: byPath, ByID: byID}, nil
+}
+
+// parentIDOf strips the last "." segment or ":" slice suffix from an id.
+func parentIDOf(id string) string {
+	if i := strings.LastIndex(id, ":"); i >= 0 {
+		return id[:i]
+	}
+	if i := strings.LastIndex(id, "."); i >= 0 {
+		return id[:i]
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Cardinality helpers
+// ---------------------------------------------------------------------------
+
+func IsMulti(elem *ElementDefinition) bool    { return elem.Max.IsUnbounded() }
+func IsRequired(elem *ElementDefinition) bool { return elem.Min > 0 }
+func Cardinality(elem *ElementDefinition) string {
+	return fmt.Sprintf("%d..%s", elem.Min, elem.Max)
+}
+
+func PrimaryTypeCode(elem *ElementDefinition) string {
+	if len(elem.Types) == 0 {
+		return ""
+	}
+	return elem.Types[0].Code
+}
+
+// IsChoice reports whether the element is a choice-of-type ([x]) element.
+func IsChoice(elem *ElementDefinition) bool {
+	return strings.HasSuffix(elem.Path, "[x]")
+}
+
+// ChoiceName returns the concrete JSON key for a choice element given a type
+// code, e.g. ("deceased[x]", "boolean") → "deceasedBoolean".
+func ChoiceName(elem *ElementDefinition, typeCode string) string {
+	base := strings.TrimSuffix(elem.Path, "[x]")
+	base = base[strings.LastIndex(base, ".")+1:]
+	return base + capitalize(typeCode)
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
