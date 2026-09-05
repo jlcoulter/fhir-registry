@@ -118,6 +118,38 @@ func overlay(base, diff RawElement) RawElement {
 		base.IsSummary = diff.IsSummary
 	}
 
+	// MustSupport follows the same replace semantics as the modifier flags.
+	if diff.MustSupport != nil {
+		base.MustSupport = diff.MustSupport
+	}
+
+	// Base cardinality block.
+	if diff.Base != nil {
+		base.Base = diff.Base
+	}
+
+	// Value constraints: a differential fixed/pattern replaces the base value.
+	if diff.Fixed != nil {
+		base.Fixed = diff.Fixed
+	}
+	if diff.Pattern != nil {
+		base.Pattern = diff.Pattern
+	}
+	if len(diff.Examples) > 0 {
+		base.Examples = diff.Examples
+	}
+
+	// Constraints, profiles, and target profiles replace the base lists.
+	if len(diff.Constraint) > 0 {
+		base.Constraint = diff.Constraint
+	}
+	if len(diff.Profile) > 0 {
+		base.Profile = diff.Profile
+	}
+	if len(diff.TargetProfile) > 0 {
+		base.TargetProfile = diff.TargetProfile
+	}
+
 	// Conditions and content references.
 	if len(diff.Condition) > 0 {
 		base.Condition = diff.Condition

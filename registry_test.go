@@ -821,3 +821,301 @@ func TestTreeConcurrentSameURL(t *testing.T) {
 		}
 	}
 }
+
+// TestRawConstraintUnmarshal verifies JSON parsing of a FHIR invariant.
+func TestRawConstraintUnmarshal(t *testing.T) {
+	var rc RawConstraint
+	data := []byte(`{"key":"inv-1","severity":"error","human":"must have a value","expression":"value.exists()","source":"http://example.org"}`)
+	if err := json.Unmarshal(data, &rc); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if rc.Key != "inv-1" || rc.Severity != "error" || rc.Human != "must have a value" ||
+		rc.Expression != "value.exists()" || rc.Source != "http://example.org" {
+		t.Errorf("RawConstraint = %+v", rc)
+	}
+}
+
+// TestRawBaseParsing verifies JSON parsing of the base cardinality sub-object.
+func TestRawBaseParsing(t *testing.T) {
+	var rb RawBase
+	if err := json.Unmarshal([]byte(`{"min":0,"max":"*"}`), &rb); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if rb.Min == nil || *rb.Min != 0 {
+		t.Errorf("min = %+v, want 0", rb.Min)
+	}
+	if string(rb.Max) != `"*"` {
+		t.Errorf("max = %s, want \"*\"", rb.Max)
+	}
+}
+
+// TestConvertRawElementMustSupport verifies MustSupport conversion, including
+// the nil-defaults-to-false case.
+func TestConvertRawElementMustSupport(t *testing.T) {
+	elem, err := convertRawElement(RawElement{ID: "X", Path: "X", MustSupport: boolptr(true)})
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if !elem.MustSupport {
+		t.Error("MustSupport = false, want true")
+	}
+	elem2, err := convertRawElement(RawElement{ID: "X", Path: "X"})
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if elem2.MustSupport {
+		t.Error("MustSupport = true, want false (nil default)")
+	}
+}
+
+// TestConvertRawElementBaseMax verifies BaseMax conversion: nil Base yields nil
+// BaseMax, and a present base.max is parsed into a *Max.
+func TestConvertRawElementBaseMax(t *testing.T) {
+	elem, err := convertRawElement(RawElement{ID: "X", Path: "X"})
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if elem.BaseMax != nil {
+		t.Errorf("BaseMax = %v, want nil when no base", elem.BaseMax)
+	}
+
+	elem2, err := convertRawElement(RawElement{ID: "X", Path: "X", Base: &RawBase{Min: intPtr(0), Max: json.RawMessage(`"*"`)}})
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if elem2.BaseMax == nil || *elem2.BaseMax != MaxUnbounded {
+		t.Errorf("BaseMax = %v, want MaxUnbounded", elem2.BaseMax)
+	}
+
+	elem3, err := convertRawElement(RawElement{ID: "X", Path: "X", Base: &RawBase{Min: intPtr(0), Max: json.RawMessage(`"1"`)}})
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if elem3.BaseMax == nil || *elem3.BaseMax != 1 {
+		t.Errorf("BaseMax = %v, want 1", elem3.BaseMax)
+	}
+}
+
+// TestConvertRawElementConstraints verifies RawConstraint to ElementConstraint
+// conversion.
+func TestConvertRawElementConstraints(t *testing.T) {
+	raw := RawElement{
+		ID:   "X",
+		Path: "X",
+		Constraint: []RawConstraint{
+			{Key: "inv-1", Severity: "error", Human: "h", Expression: "e", Source: "s"},
+		},
+	}
+	elem, err := convertRawElement(raw)
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if len(elem.Constraints) != 1 {
+		t.Fatalf("Constraints len = %d, want 1", len(elem.Constraints))
+	}
+	c := elem.Constraints[0]
+	if c.Key != "inv-1" || c.Severity != "error" || c.Human != "h" || c.Expression != "e" || c.Source != "s" {
+		t.Errorf("Constraint = %+v", c)
+	}
+}
+
+// TestConvertRawElementProfileTargetProfile verifies Profile/TargetProfile
+// passthrough.
+func TestConvertRawElementProfileTargetProfile(t *testing.T) {
+	raw := RawElement{
+		ID:            "X",
+		Path:          "X",
+		Profile:       []string{"http://example.org/profile"},
+		TargetProfile: []string{"http://example.org/target"},
+	}
+	elem, err := convertRawElement(raw)
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if len(elem.Profile) != 1 || elem.Profile[0] != "http://example.org/profile" {
+		t.Errorf("Profile = %v", elem.Profile)
+	}
+	if len(elem.TargetProfile) != 1 || elem.TargetProfile[0] != "http://example.org/target" {
+		t.Errorf("TargetProfile = %v", elem.TargetProfile)
+	}
+}
+
+// TestConvertRawElementFixedPattern verifies Fixed/Pattern passthrough.
+func TestConvertRawElementFixedPattern(t *testing.T) {
+	raw := RawElement{ID: "X", Path: "X", Fixed: "http://example.org", Pattern: map[string]any{"code": "active"}}
+	elem, err := convertRawElement(raw)
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if elem.Fixed != "http://example.org" {
+		t.Errorf("Fixed = %#v", elem.Fixed)
+	}
+	if elem.Pattern == nil {
+		t.Error("Pattern = nil, want map")
+	}
+}
+
+// TestConvertRawElementExamples verifies Examples passthrough.
+func TestConvertRawElementExamples(t *testing.T) {
+	raw := RawElement{ID: "X", Path: "X", Examples: []any{"a", "b"}}
+	elem, err := convertRawElement(raw)
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if len(elem.Examples) != 2 || elem.Examples[0] != "a" || elem.Examples[1] != "b" {
+		t.Errorf("Examples = %#v", elem.Examples)
+	}
+}
+
+// TestRawElementUnmarshalFixed verifies the custom UnmarshalJSON captures a
+// fixed* property.
+func TestRawElementUnmarshalFixed(t *testing.T) {
+	var raw RawElement
+	if err := json.Unmarshal([]byte(`{"id":"X","path":"X","fixedString":"hello"}`), &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if raw.Fixed != "hello" {
+		t.Errorf("Fixed = %#v, want hello", raw.Fixed)
+	}
+}
+
+// TestRawElementUnmarshalFixedInteger verifies a numeric fixed* property.
+func TestRawElementUnmarshalFixedInteger(t *testing.T) {
+	var raw RawElement
+	if err := json.Unmarshal([]byte(`{"id":"X","path":"X","fixedInteger":42}`), &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if raw.Fixed != float64(42) {
+		t.Errorf("Fixed = %#v, want 42", raw.Fixed)
+	}
+}
+
+// TestRawElementUnmarshalPattern verifies the custom UnmarshalJSON captures a
+// pattern* property.
+func TestRawElementUnmarshalPattern(t *testing.T) {
+	var raw RawElement
+	if err := json.Unmarshal([]byte(`{"id":"X","path":"X","patternCode":"active"}`), &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if raw.Pattern != "active" {
+		t.Errorf("Pattern = %#v, want active", raw.Pattern)
+	}
+}
+
+// TestRawElementUnmarshalExamples verifies the custom UnmarshalJSON captures
+// example values.
+func TestRawElementUnmarshalExamples(t *testing.T) {
+	var raw RawElement
+	data := []byte(`{"id":"X","path":"X","example":[{"label":"Ex","valueString":"test"},{"valueInteger":7}]}`)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(raw.Examples) != 2 {
+		t.Fatalf("Examples len = %d, want 2", len(raw.Examples))
+	}
+	if raw.Examples[0] != "test" || raw.Examples[1] != float64(7) {
+		t.Errorf("Examples = %#v", raw.Examples)
+	}
+}
+
+// TestRawElementUnmarshalMustSupport verifies mustSupport parsing.
+func TestRawElementUnmarshalMustSupport(t *testing.T) {
+	var raw RawElement
+	if err := json.Unmarshal([]byte(`{"id":"X","path":"X","mustSupport":true}`), &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if raw.MustSupport == nil || !*raw.MustSupport {
+		t.Errorf("MustSupport = %+v, want true", raw.MustSupport)
+	}
+}
+
+// TestRawElementUnmarshalBase verifies base sub-object parsing.
+func TestRawElementUnmarshalBase(t *testing.T) {
+	var raw RawElement
+	if err := json.Unmarshal([]byte(`{"id":"X","path":"X","base":{"min":0,"max":"1"}}`), &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if raw.Base == nil || raw.Base.Min == nil || *raw.Base.Min != 0 || string(raw.Base.Max) != `"1"` {
+		t.Errorf("Base = %+v", raw.Base)
+	}
+}
+
+// TestRawElementUnmarshalConstraint verifies constraint array parsing.
+func TestRawElementUnmarshalConstraint(t *testing.T) {
+	var raw RawElement
+	data := []byte(`{"id":"X","path":"X","constraint":[{"key":"inv-1","severity":"error","expression":"value.exists()"}]}`)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(raw.Constraint) != 1 || raw.Constraint[0].Key != "inv-1" || raw.Constraint[0].Severity != "error" {
+		t.Errorf("Constraint = %+v", raw.Constraint)
+	}
+}
+
+// TestRawElementUnmarshalProfileTargetProfile verifies profile/targetProfile
+// array parsing.
+func TestRawElementUnmarshalProfileTargetProfile(t *testing.T) {
+	var raw RawElement
+	data := []byte(`{"id":"X","path":"X","profile":["http://p"],"targetProfile":["http://t"]}`)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(raw.Profile) != 1 || raw.Profile[0] != "http://p" {
+		t.Errorf("Profile = %v", raw.Profile)
+	}
+	if len(raw.TargetProfile) != 1 || raw.TargetProfile[0] != "http://t" {
+		t.Errorf("TargetProfile = %v", raw.TargetProfile)
+	}
+}
+
+// TestRawElementUnmarshalFullElement verifies end-to-end: full JSON element
+// through UnmarshalJSON and convertRawElement.
+func TestRawElementUnmarshalFullElement(t *testing.T) {
+	data := []byte(`{
+		"id": "Patient.identifier",
+		"path": "Patient.identifier",
+		"min": 0,
+		"max": "*",
+		"mustSupport": true,
+		"base": {"min": 0, "max": "*"},
+		"type": [{"code": "Identifier", "profile": ["http://example.org/au-ihi"]}],
+		"profile": ["http://example.org/elem-profile"],
+		"targetProfile": ["http://example.org/elem-target"],
+		"constraint": [{"key": "inv-1", "severity": "error", "expression": "value.exists()"}],
+		"fixedString": "fixed-value",
+		"patternCode": "active",
+		"example": [{"label": "Ex", "valueString": "example-value"}]
+	}`)
+	var raw RawElement
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	elem, err := convertRawElement(raw)
+	if err != nil {
+		t.Fatalf("convertRawElement: %v", err)
+	}
+	if !elem.MustSupport {
+		t.Error("MustSupport = false, want true")
+	}
+	if elem.BaseMax == nil || *elem.BaseMax != MaxUnbounded {
+		t.Errorf("BaseMax = %v, want MaxUnbounded", elem.BaseMax)
+	}
+	if len(elem.Profile) != 1 || elem.Profile[0] != "http://example.org/elem-profile" {
+		t.Errorf("Profile = %v", elem.Profile)
+	}
+	if len(elem.TargetProfile) != 1 || elem.TargetProfile[0] != "http://example.org/elem-target" {
+		t.Errorf("TargetProfile = %v", elem.TargetProfile)
+	}
+	if len(elem.Constraints) != 1 || elem.Constraints[0].Key != "inv-1" {
+		t.Errorf("Constraints = %+v", elem.Constraints)
+	}
+	if elem.Fixed != "fixed-value" {
+		t.Errorf("Fixed = %#v, want fixed-value", elem.Fixed)
+	}
+	if elem.Pattern != "active" {
+		t.Errorf("Pattern = %#v, want active", elem.Pattern)
+	}
+	if len(elem.Examples) != 1 || elem.Examples[0] != "example-value" {
+		t.Errorf("Examples = %#v", elem.Examples)
+	}
+}

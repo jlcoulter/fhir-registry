@@ -44,15 +44,32 @@ type ElementDefinition struct {
 	Comment            string               `json:"comment,omitempty"`
 	Min                int                  `json:"min"`
 	Max                Max                  `json:"max"` // MaxUnbounded represents "*"
+	MustSupport        bool                 `json:"mustSupport,omitempty"`
+	BaseMax            *Max                 `json:"baseMax,omitempty"` // nil means "not specified / inherit"
 	Types              []ElementType        `json:"types,omitempty"`
+	Profile            []string             `json:"profile,omitempty"`
+	TargetProfile      []string             `json:"targetProfile,omitempty"`
 	IsModifier         bool                 `json:"isModifier"`
 	IsSummary          bool                 `json:"isSummary"`
 	Binding            *Binding             `json:"binding,omitempty"`
+	Fixed              any                  `json:"fixed,omitempty"`
+	Pattern            any                  `json:"pattern,omitempty"`
+	Examples           []any                `json:"examples,omitempty"`
+	Constraints        []ElementConstraint  `json:"constraint,omitempty"`
 	Condition          []string             `json:"condition,omitempty"`
 	MeaningWhenMissing string               `json:"meaningWhenMissing,omitempty"`
 	ContentReference   string               `json:"contentReference,omitempty"`
 	Slicing            *Slicing             `json:"slicing,omitempty"`
 	Children           []*ElementDefinition `json:"children,omitempty"`
+}
+
+// ElementConstraint is a FHIR invariant (constraint) attached to an element.
+type ElementConstraint struct {
+	Key        string
+	Severity   string
+	Human      string
+	Expression string
+	Source     string
 }
 
 // ElementType represents a single type choice for a FHIR element.
@@ -113,6 +130,8 @@ type Differential struct {
 
 // RawElement is the flat JSON shape from the StructureDefinition file.
 // The "max" field comes as a string ("1", "*", "0") so it needs custom parsing.
+// Fixed, Pattern, and Examples are populated by UnmarshalJSON from the
+// polymorphic fixed*, pattern*, and example properties.
 type RawElement struct {
 	ID                 string          `json:"id"`
 	Path               string          `json:"path"`
@@ -122,14 +141,38 @@ type RawElement struct {
 	Comment            string          `json:"comment,omitempty"`
 	Min                *int            `json:"min"`
 	Max                json.RawMessage `json:"max"`
+	MustSupport        *bool           `json:"mustSupport,omitempty"`
+	Base               *RawBase        `json:"base,omitempty"`
 	Types              []RawType       `json:"type,omitempty"`
+	Profile            []string        `json:"profile,omitempty"`
+	TargetProfile      []string        `json:"targetProfile,omitempty"`
 	IsModifier         *bool           `json:"isModifier"`
 	IsSummary          *bool           `json:"isSummary"`
 	Binding            *RawBinding     `json:"binding,omitempty"`
+	Constraint         []RawConstraint `json:"constraint,omitempty"`
 	Condition          []string        `json:"condition,omitempty"`
 	MeaningWhenMissing string          `json:"meaningWhenMissing,omitempty"`
 	ContentReference   string          `json:"contentReference,omitempty"`
 	Slicing            *Slicing        `json:"slicing,omitempty"`
+	Fixed              any             `json:"-"`
+	Pattern            any             `json:"-"`
+	Examples           []any           `json:"-"`
+}
+
+// RawBase is the "base" sub-object of an element, recording the cardinality
+// inherited from the base definition.
+type RawBase struct {
+	Min *int            `json:"min"`
+	Max json.RawMessage `json:"max"`
+}
+
+// RawConstraint is the JSON shape of a FHIR invariant.
+type RawConstraint struct {
+	Key        string `json:"key"`
+	Severity   string `json:"severity"`
+	Human      string `json:"human"`
+	Expression string `json:"expression"`
+	Source     string `json:"source"`
 }
 
 type RawType struct {
@@ -142,6 +185,56 @@ type RawBinding struct {
 	Strength    string `json:"strength"`
 	Description string `json:"description,omitempty"`
 	ValueSet    string `json:"valueSet,omitempty"`
+}
+
+// UnmarshalJSON decodes a raw element, capturing the polymorphic fixed*,
+// pattern*, and example properties that have no fixed struct field. FHIR
+// allows at most one fixed* and one pattern* property per element, so the
+// first match wins.
+func (r *RawElement) UnmarshalJSON(data []byte) error {
+	type Alias RawElement
+	aux := (*Alias)(r)
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+
+	for key, val := range m {
+		if strings.HasPrefix(key, "fixed") && len(key) > len("fixed") {
+			var v any
+			if err := json.Unmarshal(val, &v); err == nil {
+				r.Fixed = v
+			}
+			break
+		}
+	}
+	for key, val := range m {
+		if strings.HasPrefix(key, "pattern") && len(key) > len("pattern") {
+			var v any
+			if err := json.Unmarshal(val, &v); err == nil {
+				r.Pattern = v
+			}
+			break
+		}
+	}
+	if raw, ok := m["example"]; ok {
+		var examples []map[string]any
+		if err := json.Unmarshal(raw, &examples); err == nil {
+			for _, e := range examples {
+				for k, v := range e {
+					if strings.HasPrefix(k, "value") {
+						r.Examples = append(r.Examples, v)
+						break
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +303,24 @@ func convertRawElement(raw RawElement) (ElementDefinition, error) {
 		min = *raw.Min
 	}
 
+	var baseMax *Max
+	if raw.Base != nil {
+		if bm, err := parseMax(raw.Base.Max); err == nil {
+			baseMax = &bm
+		}
+	}
+
+	constraints := make([]ElementConstraint, 0, len(raw.Constraint))
+	for _, rc := range raw.Constraint {
+		constraints = append(constraints, ElementConstraint{
+			Key:        rc.Key,
+			Severity:   rc.Severity,
+			Human:      rc.Human,
+			Expression: rc.Expression,
+			Source:     rc.Source,
+		})
+	}
+
 	return ElementDefinition{
 		ID:                 raw.ID,
 		Path:               raw.Path,
@@ -219,10 +330,18 @@ func convertRawElement(raw RawElement) (ElementDefinition, error) {
 		Comment:            raw.Comment,
 		Min:                min,
 		Max:                maxVal,
+		MustSupport:        ptrBool(raw.MustSupport),
+		BaseMax:            baseMax,
 		Types:              types,
+		Profile:            raw.Profile,
+		TargetProfile:      raw.TargetProfile,
 		IsModifier:         ptrBool(raw.IsModifier),
 		IsSummary:          ptrBool(raw.IsSummary),
 		Binding:            binding,
+		Fixed:              raw.Fixed,
+		Pattern:            raw.Pattern,
+		Examples:           raw.Examples,
+		Constraints:        constraints,
 		Condition:          raw.Condition,
 		MeaningWhenMissing: raw.MeaningWhenMissing,
 		ContentReference:   raw.ContentReference,
