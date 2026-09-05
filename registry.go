@@ -181,13 +181,39 @@ func NewStructureDefinition(url, name, typ, kind, baseDefinition, derivation str
 	}
 }
 
+// NewStructureDefinitionDiff builds a StructureDefinition whose differential is
+// the given flat element list. This is used for profiles that derive from a base
+// definition, so the registry's ensureSnapshot merges the base.
+func NewStructureDefinitionDiff(url, name, typ, kind, baseDefinition, derivation string, elements []ElementDefinition) *StructureDefinition {
+	raws := make([]RawElement, 0, len(elements))
+	for _, e := range elements {
+		raws = append(raws, rawElementFromDefinition(e))
+	}
+	return &StructureDefinition{
+		URL:            url,
+		Name:           name,
+		Type:           typ,
+		Kind:           kind,
+		BaseDefinition: baseDefinition,
+		Derivation:     derivation,
+		Differential:   &Differential{Elements: raws},
+	}
+}
+
 // rawElementFromDefinition converts an ElementDefinition back into its raw
 // JSON shape so it can be stored in a Snapshot.
 func rawElementFromDefinition(e ElementDefinition) RawElement {
 	min := e.Min
 	ms := e.MustSupport
+	id := e.ID
+	if id == "" && e.Path != "" {
+		id = e.Path
+		if e.SliceName != "" {
+			id = e.Path + ":" + e.SliceName
+		}
+	}
 	raw := RawElement{
-		ID:            e.ID,
+		ID:            id,
 		Path:          e.Path,
 		SliceName:     e.SliceName,
 		Short:         e.Short,
