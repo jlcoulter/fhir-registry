@@ -61,6 +61,15 @@ type ElementDefinition struct {
 	ContentReference   string               `json:"contentReference,omitempty"`
 	Slicing            *Slicing             `json:"slicing,omitempty"`
 	Children           []*ElementDefinition `json:"children,omitempty"`
+	Slices             []*SliceGroup        `json:"slices,omitempty"`
+}
+
+// SliceGroup groups the sliced children of a repeating element under a single
+// slice name. Definition is the slice entry element (the child carrying the
+// SliceName); its own Children hold the slice's sub-elements.
+type SliceGroup struct {
+	Name       string
+	Definition *ElementDefinition
 }
 
 // ElementConstraint is a FHIR invariant (constraint) attached to an element.
@@ -652,6 +661,28 @@ func BuildTreeElements(sd *StructureDefinition, raws []RawElement) (*ElementTree
 		}
 	}
 
+	// Group sliced children into Slices and remove them from Children, so
+	// Children holds only non-sliced direct children. A slice entry (a child
+	// with a SliceName) becomes a SliceGroup on its parent; the slice's own
+	// sub-elements remain reachable via SliceGroup.Definition.Children.
+	for i := range all {
+		elem := &all[i]
+		if len(elem.Children) == 0 {
+			continue
+		}
+		kept := elem.Children[:0]
+		var slices []*SliceGroup
+		for _, child := range elem.Children {
+			if child.SliceName == "" {
+				kept = append(kept, child)
+				continue
+			}
+			slices = append(slices, &SliceGroup{Name: child.SliceName, Definition: child})
+		}
+		elem.Children = kept
+		elem.Slices = slices
+	}
+
 	root := byID[sd.Type]
 	if root == nil {
 		// Fall back to the first element (the root of the snapshot).
@@ -668,13 +699,18 @@ func BuildTreeElements(sd *StructureDefinition, raws []RawElement) (*ElementTree
 	return &ElementTree{SD: sd, Root: root, ByPath: byPath, ByID: byID}, nil
 }
 
-// parentIDOf strips the last "." segment or ":" slice suffix from an id.
+// parentIDOf strips the last "." segment or ":" slice suffix from an id,
+// whichever separator appears last. For "Foo.ext:birthPlace.url" the parent is
+// "Foo.ext:birthPlace" (the "." before "url" is the last separator), not
+// "Foo.ext".
 func parentIDOf(id string) string {
-	if i := strings.LastIndex(id, ":"); i >= 0 {
-		return id[:i]
+	lastColon := strings.LastIndex(id, ":")
+	lastDot := strings.LastIndex(id, ".")
+	if lastColon > lastDot {
+		return id[:lastColon]
 	}
-	if i := strings.LastIndex(id, "."); i >= 0 {
-		return id[:i]
+	if lastDot > lastColon {
+		return id[:lastDot]
 	}
 	return ""
 }

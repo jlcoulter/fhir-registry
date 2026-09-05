@@ -152,15 +152,21 @@ func TestBuildTreeSlicedElements(t *testing.T) {
 	if base == nil {
 		t.Fatal("no base Patient.extension element")
 	}
-	// A slice is a child of the base element.
+	// A slice is grouped into the base element's Slices, not its Children.
 	found := false
-	for _, c := range base.Children {
-		if c.SliceName == "birthPlace" {
+	for _, s := range base.Slices {
+		if s.Name == "birthPlace" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("birthPlace slice not a child of base extension")
+		t.Error("birthPlace slice not in base extension Slices")
+	}
+	// The slice entry is not a direct child of the base element.
+	for _, c := range base.Children {
+		if c.SliceName == "birthPlace" {
+			t.Error("birthPlace slice should not be in base extension Children")
+		}
 	}
 	// ByID lookup works for slice ids.
 	if _, ok := tree.ByID["Patient.extension:birthPlace"]; !ok {
@@ -417,6 +423,132 @@ func TestBuildTreeElementsPathMap(t *testing.T) {
 	}
 	if _, ok := tree.ByID["Foo.bar:slice"]; !ok {
 		t.Error("ByID missing Foo.bar:slice")
+	}
+}
+
+// TestBuildTreeElementsSliceGroup verifies that a sliced child is grouped into
+// the parent's Slices and removed from its Children.
+func TestBuildTreeElementsSliceGroup(t *testing.T) {
+	sd := &StructureDefinition{ID: "slice", Type: "Foo"}
+	raws := []RawElement{
+		rawElem("Foo", "Foo"),
+		rawElem("Foo.ext", "Foo.ext"),
+		{ID: "Foo.ext:birthPlace", Path: "Foo.ext", SliceName: "birthPlace", Min: intPtr(0), Max: json.RawMessage(`"1"`)},
+		{ID: "Foo.ext:birthPlace.url", Path: "Foo.ext.url", Min: intPtr(0), Max: json.RawMessage(`"1"`)},
+	}
+	tree, err := BuildTreeElements(sd, raws)
+	if err != nil {
+		t.Fatalf("BuildTreeElements: %v", err)
+	}
+	ext := tree.ByID["Foo.ext"]
+	if ext == nil {
+		t.Fatal("Foo.ext not found")
+	}
+	// The slice entry is grouped into Slices, not Children.
+	if len(ext.Slices) != 1 {
+		t.Fatalf("Foo.ext Slices len = %d, want 1", len(ext.Slices))
+	}
+	g := ext.Slices[0]
+	if g.Name != "birthPlace" {
+		t.Errorf("SliceGroup.Name = %q, want birthPlace", g.Name)
+	}
+	if g.Definition == nil || g.Definition.ID != "Foo.ext:birthPlace" {
+		t.Errorf("SliceGroup.Definition = %+v, want Foo.ext:birthPlace", g.Definition)
+	}
+	// The slice entry is not a direct child.
+	for _, c := range ext.Children {
+		if c.SliceName == "birthPlace" {
+			t.Error("slice entry should not be in Children")
+		}
+	}
+	// The slice's sub-element is reachable via the slice entry's Children.
+	if g.Definition == nil || len(g.Definition.Children) != 1 || g.Definition.Children[0].ID != "Foo.ext:birthPlace.url" {
+		t.Errorf("slice entry children = %+v, want [Foo.ext:birthPlace.url]", g.Definition.Children)
+	}
+}
+
+// TestBuildTreeElementsMultipleSlices verifies multiple slices of one element.
+func TestBuildTreeElementsMultipleSlices(t *testing.T) {
+	sd := &StructureDefinition{ID: "multi", Type: "Foo"}
+	raws := []RawElement{
+		rawElem("Foo", "Foo"),
+		rawElem("Foo.ext", "Foo.ext"),
+		{ID: "Foo.ext:a", Path: "Foo.ext", SliceName: "a", Min: intPtr(0), Max: json.RawMessage(`"1"`)},
+		{ID: "Foo.ext:b", Path: "Foo.ext", SliceName: "b", Min: intPtr(0), Max: json.RawMessage(`"1"`)},
+	}
+	tree, err := BuildTreeElements(sd, raws)
+	if err != nil {
+		t.Fatalf("BuildTreeElements: %v", err)
+	}
+	ext := tree.ByID["Foo.ext"]
+	if ext == nil {
+		t.Fatal("Foo.ext not found")
+	}
+	if len(ext.Slices) != 2 {
+		t.Fatalf("Foo.ext Slices len = %d, want 2", len(ext.Slices))
+	}
+	names := map[string]bool{}
+	for _, g := range ext.Slices {
+		names[g.Name] = true
+	}
+	if !names["a"] || !names["b"] {
+		t.Errorf("Slices names = %v, want a and b", names)
+	}
+}
+
+// TestBuildTreeElementsNestedSlice verifies a slice nested within a slice is
+// grouped into the outer slice entry's Slices.
+func TestBuildTreeElementsNestedSlice(t *testing.T) {
+	sd := &StructureDefinition{ID: "nested", Type: "Foo"}
+	raws := []RawElement{
+		rawElem("Foo", "Foo"),
+		rawElem("Foo.ext", "Foo.ext"),
+		{ID: "Foo.ext:outer", Path: "Foo.ext", SliceName: "outer", Min: intPtr(0), Max: json.RawMessage(`"1"`)},
+		rawElem("Foo.ext:outer.ext", "Foo.ext.ext"),
+		{ID: "Foo.ext:outer.ext:inner", Path: "Foo.ext.ext", SliceName: "inner", Min: intPtr(0), Max: json.RawMessage(`"1"`)},
+	}
+	tree, err := BuildTreeElements(sd, raws)
+	if err != nil {
+		t.Fatalf("BuildTreeElements: %v", err)
+	}
+	outer := tree.ByID["Foo.ext:outer"]
+	if outer == nil {
+		t.Fatal("outer slice not found")
+	}
+	// The inner slice is grouped into the outer slice entry's sub-element's
+	// Slices, which is reachable through the outer slice entry's Children.
+	if len(outer.Children) != 1 {
+		t.Fatalf("outer Children len = %d, want 1", len(outer.Children))
+	}
+	sub := outer.Children[0]
+	if sub.ID != "Foo.ext:outer.ext" {
+		t.Fatalf("outer child = %s, want Foo.ext:outer.ext", sub.ID)
+	}
+	if len(sub.Slices) != 1 {
+		t.Fatalf("sub Slices len = %d, want 1", len(sub.Slices))
+	}
+	if sub.Slices[0].Name != "inner" {
+		t.Errorf("inner slice name = %q, want inner", sub.Slices[0].Name)
+	}
+	if sub.Slices[0].Definition == nil || sub.Slices[0].Definition.ID != "Foo.ext:outer.ext:inner" {
+		t.Errorf("inner definition = %+v", sub.Slices[0].Definition)
+	}
+}
+
+// TestBuildTreeElementsNoSlices verifies an element without slicing has nil
+// Slices.
+func TestBuildTreeElementsNoSlices(t *testing.T) {
+	sd := &StructureDefinition{ID: "noslice", Type: "Foo"}
+	raws := []RawElement{
+		rawElem("Foo", "Foo"),
+		rawElem("Foo.bar", "Foo.bar"),
+	}
+	tree, err := BuildTreeElements(sd, raws)
+	if err != nil {
+		t.Fatalf("BuildTreeElements: %v", err)
+	}
+	if tree.Root.Slices != nil {
+		t.Errorf("Root.Slices = %v, want nil", tree.Root.Slices)
 	}
 }
 
