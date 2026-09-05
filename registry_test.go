@@ -190,6 +190,132 @@ func rawElem(id, path string) RawElement {
 
 func intPtr(v int) *int { return &v }
 
+// TestEnsureSnapshotSnapshotPresent verifies that a definition with a snapshot
+// returns its snapshot elements directly, without touching the differential.
+func TestEnsureSnapshotSnapshotPresent(t *testing.T) {
+	reg := NewRegistry()
+	sd := &StructureDefinition{
+		ID:   "snap",
+		Type: "Foo",
+		Snapshot: &Snapshot{Elements: []RawElement{
+			rawElem("Foo", "Foo"),
+			rawElem("Foo.bar", "Foo.bar"),
+		}},
+		Differential: &Differential{Elements: []RawElement{
+			rawElem("Foo.bar", "Foo.bar"),
+		}},
+	}
+	raws, err := reg.ensureSnapshot(sd)
+	if err != nil {
+		t.Fatalf("ensureSnapshot: %v", err)
+	}
+	if len(raws) != 2 {
+		t.Fatalf("got %d elements, want 2 (snapshot preferred)", len(raws))
+	}
+}
+
+// TestEnsureSnapshotDifferentialOnly verifies that a differential-only profile
+// resolves its base definition from the registry and merges the differential
+// onto the base snapshot.
+func TestEnsureSnapshotDifferentialOnly(t *testing.T) {
+	reg := NewRegistry()
+	// Base definition with a snapshot.
+	base := &StructureDefinition{
+		ID:   "base",
+		Type: "Foo",
+		Snapshot: &Snapshot{Elements: []RawElement{
+			rawElem("Foo", "Foo"),
+			rawElem("Foo.bar", "Foo.bar"),
+			rawElem("Foo.baz", "Foo.baz"),
+		}},
+	}
+	reg.byURL["http://example.org/StructureDefinition/Base"] = base
+
+	// Profile with only a differential that narrows Foo.bar.
+	profile := &StructureDefinition{
+		ID:             "profile",
+		Type:           "Foo",
+		BaseDefinition: "http://example.org/StructureDefinition/Base",
+		Differential: &Differential{Elements: []RawElement{
+			{ID: "Foo.bar", Path: "Foo.bar", Min: intPtr(1)},
+		}},
+	}
+	raws, err := reg.ensureSnapshot(profile)
+	if err != nil {
+		t.Fatalf("ensureSnapshot: %v", err)
+	}
+	// Merged result keeps all base elements (3) with the differential overlaid.
+	if len(raws) != 3 {
+		t.Fatalf("got %d elements, want 3 (base + merged)", len(raws))
+	}
+	var bar *RawElement
+	for i := range raws {
+		if raws[i].ID == "Foo.bar" {
+			bar = &raws[i]
+		}
+	}
+	if bar == nil || bar.Min == nil || *bar.Min != 1 {
+		t.Errorf("Foo.bar min = %+v, want 1 (overlaid from differential)", bar)
+	}
+}
+
+// TestEnsureSnapshotBaseWithVersion verifies that a base definition URL with a
+// "|version" suffix is stripped before registry lookup.
+func TestEnsureSnapshotBaseWithVersion(t *testing.T) {
+	reg := NewRegistry()
+	base := &StructureDefinition{
+		ID:   "base",
+		Type: "Foo",
+		Snapshot: &Snapshot{Elements: []RawElement{
+			rawElem("Foo", "Foo"),
+		}},
+	}
+	reg.byURL["http://example.org/StructureDefinition/Base"] = base
+
+	profile := &StructureDefinition{
+		ID:             "profile",
+		Type:           "Foo",
+		BaseDefinition: "http://example.org/StructureDefinition/Base|4.0.1",
+		Differential: &Differential{Elements: []RawElement{
+			rawElem("Foo.bar", "Foo.bar"),
+		}},
+	}
+	raws, err := reg.ensureSnapshot(profile)
+	if err != nil {
+		t.Fatalf("ensureSnapshot with versioned base: %v", err)
+	}
+	if len(raws) != 2 {
+		t.Fatalf("got %d elements, want 2", len(raws))
+	}
+}
+
+// TestEnsureSnapshotNoElements verifies the error when a definition has neither
+// a snapshot nor a differential.
+func TestEnsureSnapshotNoElements(t *testing.T) {
+	reg := NewRegistry()
+	sd := &StructureDefinition{ID: "empty", Type: "Foo"}
+	if _, err := reg.ensureSnapshot(sd); err == nil {
+		t.Fatal("expected error for definition with no elements")
+	}
+}
+
+// TestEnsureSnapshotBaseMissing verifies the error when a differential-only
+// profile's base definition cannot be resolved.
+func TestEnsureSnapshotBaseMissing(t *testing.T) {
+	reg := NewRegistry()
+	profile := &StructureDefinition{
+		ID:             "profile",
+		Type:           "Foo",
+		BaseDefinition: "http://example.org/StructureDefinition/Missing",
+		Differential: &Differential{Elements: []RawElement{
+			rawElem("Foo.bar", "Foo.bar"),
+		}},
+	}
+	if _, err := reg.ensureSnapshot(profile); err == nil {
+		t.Fatal("expected error for unresolvable base definition")
+	}
+}
+
 func TestBuildTreeSnapshotPreferred(t *testing.T) {
 	sd := &StructureDefinition{
 		ID:   "snap",
@@ -301,6 +427,96 @@ func TestChoiceName(t *testing.T) {
 	}
 	if got := ChoiceName(elem, "dateTime"); got != "deceasedDateTime" {
 		t.Errorf("ChoiceName(dateTime) = %s", got)
+	}
+}
+
+// TestIsRequired verifies the required-element predicate.
+func TestIsRequired(t *testing.T) {
+	cases := []struct {
+		min  int
+		want bool
+	}{
+		{0, false},
+		{1, true},
+		{2, true},
+	}
+	for _, tc := range cases {
+		elem := &ElementDefinition{Min: tc.min}
+		if got := IsRequired(elem); got != tc.want {
+			t.Errorf("IsRequired(min=%d) = %v, want %v", tc.min, got, tc.want)
+		}
+	}
+}
+
+// TestStripVersion verifies removal of a "|version" suffix from a canonical URL.
+func TestStripVersion(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"http://example.org/StructureDefinition/X", "http://example.org/StructureDefinition/X"},
+		{"http://example.org/StructureDefinition/X|4.0.1", "http://example.org/StructureDefinition/X"},
+		{"http://example.org/StructureDefinition/X|", "http://example.org/StructureDefinition/X"},
+	}
+	for _, tc := range cases {
+		if got := stripVersion(tc.in); got != tc.want {
+			t.Errorf("stripVersion(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestPrimaryTypeCode verifies the primary type code helper, including the
+// empty-types case.
+func TestPrimaryTypeCode(t *testing.T) {
+	if got := PrimaryTypeCode(&ElementDefinition{}); got != "" {
+		t.Errorf("PrimaryTypeCode(no types) = %q, want empty", got)
+	}
+	elem := &ElementDefinition{Types: []ElementType{{Code: "string"}, {Code: "code"}}}
+	if got := PrimaryTypeCode(elem); got != "string" {
+		t.Errorf("PrimaryTypeCode = %q, want string", got)
+	}
+}
+
+// TestCapitalize verifies the capitalize helper, including the empty case.
+func TestCapitalize(t *testing.T) {
+	if got := capitalize(""); got != "" {
+		t.Errorf("capitalize(\"\") = %q, want empty", got)
+	}
+	if got := capitalize("boolean"); got != "Boolean" {
+		t.Errorf("capitalize(boolean) = %q, want Boolean", got)
+	}
+	if got := capitalize("dateTime"); got != "DateTime" {
+		t.Errorf("capitalize(dateTime) = %q, want DateTime", got)
+	}
+}
+
+// TestLastSegment verifies the last path segment helper, including the
+// no-dot case.
+func TestLastSegment(t *testing.T) {
+	if got := lastSegment("Organization.name"); got != "name" {
+		t.Errorf("lastSegment(Organization.name) = %q, want name", got)
+	}
+	if got := lastSegment("name"); got != "name" {
+		t.Errorf("lastSegment(name) = %q, want name", got)
+	}
+	if got := lastSegment(""); got != "" {
+		t.Errorf("lastSegment(\"\") = %q, want empty", got)
+	}
+}
+
+// TestOr verifies the or() helper: prefer the second value when non-empty.
+func TestOr(t *testing.T) {
+	cases := []struct {
+		a, b, want string
+	}{
+		{"base", "diff", "diff"},
+		{"base", "", "base"},
+		{"", "diff", "diff"},
+		{"", "", ""},
+	}
+	for _, tc := range cases {
+		if got := or(tc.a, tc.b); got != tc.want {
+			t.Errorf("or(%q, %q) = %q, want %q", tc.a, tc.b, got, tc.want)
+		}
 	}
 }
 
