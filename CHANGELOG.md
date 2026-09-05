@@ -18,6 +18,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - Package loading — load FHIR packages from a directory or `.tgz`, and resolve
   full dependency chains from a registry server with caching via
   `PackageClient`.
+- `LoadPackageTgzWithDeps` — load a FHIR package from a `.tgz` archive and
+  resolve its full dependency chain.
+- `StructureDefinitions` — return every indexed `StructureDefinition`, sorted
+  by canonical URL.
+- Local archive support — `PackageClient.LocalArchives` and
+  `IndexLocalArchives` let `Download` prefer local `.tgz`/`.tar.gz` archives
+  over the network.
+- Conflict policy — `ConflictPolicy` (`ConflictPolicyStrict`,
+  `ConflictPolicyRootWins`) controls how version conflicts between the same
+  package at different versions are resolved during dependency resolution.
 - `Marshal` — normalizes instance resources against type trees (array/scalar
   wrapping, choice elements, cardinality checks).
 - Cardinality helpers — `IsMulti`, `IsRequired`, `Cardinality`,

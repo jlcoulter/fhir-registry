@@ -31,6 +31,7 @@ if err != nil {
 - **Element trees** - build recursively-linked trees from snapshots or differentials, with slice handling and path/ID lookup.
 - **Differential merging** - `MergeDifferential` overlays a profile's differential onto its base snapshot.
 - **Package loading** - load FHIR packages from a directory or `.tgz`, and resolve full dependency chains from a registry server with caching.
+- **Local archives** - `PackageClient` can prefer local `.tgz`/`.tar.gz` archives over the network, with a configurable version-conflict policy.
 - **Marshal** - normalise instance resources against type trees (array/scalar wrapping, choice elements, cardinality checks).
 - **Cardinality helpers** - `IsMulti`, `IsRequired`, `Cardinality`, `PrimaryTypeCode`, `IsChoice`, `ChoiceName`.
 - **Terminology & conformance resources** - index ValueSets, CodeSystems, CapabilityStatements, and SearchParameters from packages, plus any other resource type as an opaque `Resource`.
@@ -52,6 +53,36 @@ Normalise an instance:
 
 ```go
 out, report, err := reg.Marshal("Patient", instance)
+```
+
+## Local archives & conflict policy
+
+`PackageClient` can resolve dependencies from local `.tgz`/`.tar.gz` archives
+instead of the network. Index a directory of archives, then `Download` (and
+dependency resolution) prefers a matching local archive over the registry:
+
+```go
+client, _ := fhir.NewPackageClient()
+if err := client.IndexLocalArchives("./packages"); err != nil {
+    log.Fatal(err)
+}
+// client.LocalArchives now maps "name@version" -> archive path.
+```
+
+`IndexLocalArchives` scans a directory recursively, reads each archive's
+`package.json` manifest, and indexes it by `"name@version"`. A non-existent
+directory is not an error, and existing entries are not overwritten. Archives
+without a readable manifest are skipped.
+
+When the same package is requested at different versions during dependency
+resolution, `ConflictPolicy` decides the outcome:
+
+- `ConflictPolicyRootWins` (default) - keep the first-selected version and
+  override later conflicting requests.
+- `ConflictPolicyStrict` - fail with an error on a version conflict.
+
+```go
+client.ConflictPolicy = fhir.ConflictPolicyStrict
 ```
 
 ## Terminology & conformance resources
@@ -155,6 +186,7 @@ reg.Resolve()
 - `Resource` - opaque generic resource (`ResourceType`, `ProfileURLs`, `Raw`).
 - `Scope`, `ScopePolicy` - narrow which resources a Registry indexes.
 - `Registry.Resolve` - finalise a scoped Registry, indexing referenced ValueSets/CodeSystems.
+- `PackageClient` - downloads packages from a registry, with `LocalArchives` and `ConflictPolicy` for offline/version-conflict handling.
 
 ## Errors
 
