@@ -374,14 +374,30 @@ type Registry struct {
 	byType map[string][]*StructureDefinition
 	// trees caches the built element tree per canonical URL.
 	trees map[string]*ElementTree
+	// valueSets indexes ValueSets by canonical URL.
+	valueSets map[string]*ValueSet
+	// codeSystems indexes CodeSystems by canonical URL.
+	codeSystems map[string]*CodeSystem
+	// capabilityStatements holds all registered CapabilityStatements.
+	capabilityStatements []*CapabilityStatement
+	// searchParams holds all registered SearchParameters.
+	searchParams []*SearchParameter
+	// searchParamIndex maps "resourceType:code" to a SearchParameter.
+	searchParamIndex map[string]*SearchParameter
+	// resources indexes generic Resources by resource type.
+	resources map[string][]*Resource
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		byURL:  make(map[string]*StructureDefinition),
-		byType: make(map[string][]*StructureDefinition),
-		trees:  make(map[string]*ElementTree),
+		byURL:            make(map[string]*StructureDefinition),
+		byType:           make(map[string][]*StructureDefinition),
+		trees:            make(map[string]*ElementTree),
+		valueSets:        make(map[string]*ValueSet),
+		codeSystems:      make(map[string]*CodeSystem),
+		searchParamIndex: make(map[string]*SearchParameter),
+		resources:        make(map[string][]*Resource),
 	}
 }
 
@@ -462,23 +478,100 @@ func (r *Registry) addResource(name string, data []byte) error {
 	if err := json.Unmarshal(data, &head); err != nil || head.ResourceType == "" {
 		return nil // package.json, .index.json, etc.
 	}
-	if head.ResourceType != "StructureDefinition" {
-		return nil
+	switch head.ResourceType {
+	case "StructureDefinition":
+		var sd StructureDefinition
+		if err := json.Unmarshal(data, &sd); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if sd.URL == "" {
+			return nil
+		}
+		r.mu.Lock()
+		r.byURL[sd.URL] = &sd
+		if sd.Type != "" {
+			r.byType[sd.Type] = append(r.byType[sd.Type], &sd)
+		}
+		r.mu.Unlock()
+	case "ValueSet":
+		var vs ValueSet
+		if err := json.Unmarshal(data, &vs); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if vs.URL == "" {
+			return nil
+		}
+		r.mu.Lock()
+		r.valueSets[vs.URL] = &vs
+		r.mu.Unlock()
+	case "CodeSystem":
+		var cs CodeSystem
+		if err := json.Unmarshal(data, &cs); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if cs.URL == "" {
+			return nil
+		}
+		r.mu.Lock()
+		r.codeSystems[cs.URL] = &cs
+		r.mu.Unlock()
+	case "CapabilityStatement":
+		var cs CapabilityStatement
+		if err := json.Unmarshal(data, &cs); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		r.mu.Lock()
+		r.capabilityStatements = append(r.capabilityStatements, &cs)
+		r.mu.Unlock()
+	case "SearchParameter":
+		var sp SearchParameter
+		if err := json.Unmarshal(data, &sp); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		r.mu.Lock()
+		r.searchParams = append(r.searchParams, &sp)
+		for _, base := range sp.Base {
+			r.searchParamIndex[base+":"+sp.Code] = &sp
+		}
+		r.mu.Unlock()
+	default:
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil // not a JSON object resource
+		}
+		resourceType, _ := raw["resourceType"].(string)
+		if resourceType == "" {
+			return nil
+		}
+		res := &Resource{
+			ResourceType: resourceType,
+			ProfileURLs:  profileURLsOf(raw),
+			Raw:          raw,
+		}
+		r.mu.Lock()
+		r.resources[resourceType] = append(r.resources[resourceType], res)
+		r.mu.Unlock()
 	}
-	var sd StructureDefinition
-	if err := json.Unmarshal(data, &sd); err != nil {
-		return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
-	}
-	if sd.URL == "" {
-		return nil
-	}
-	r.mu.Lock()
-	r.byURL[sd.URL] = &sd
-	if sd.Type != "" {
-		r.byType[sd.Type] = append(r.byType[sd.Type], &sd)
-	}
-	r.mu.Unlock()
 	return nil
+}
+
+// profileURLsOf extracts the meta.profile URLs from a decoded resource map.
+func profileURLsOf(raw map[string]any) []string {
+	meta, ok := raw["meta"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	profiles, ok := meta["profile"].([]any)
+	if !ok {
+		return nil
+	}
+	var urls []string
+	for _, p := range profiles {
+		if s, ok := p.(string); ok {
+			urls = append(urls, s)
+		}
+	}
+	return urls
 }
 
 // Definition returns the StructureDefinition for a canonical URL.
