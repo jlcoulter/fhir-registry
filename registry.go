@@ -656,6 +656,19 @@ func (r *Registry) Definition(url string) (*StructureDefinition, bool) {
 	return sd, ok
 }
 
+// StructureDefinitions returns every indexed StructureDefinition, sorted by
+// canonical URL. The returned slice is a copy owned by the caller.
+func (r *Registry) StructureDefinitions() []*StructureDefinition {
+	r.mu.RLock()
+	out := make([]*StructureDefinition, 0, len(r.byURL))
+	for _, sd := range r.byURL {
+		out = append(out, sd)
+	}
+	r.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].URL < out[j].URL })
+	return out
+}
+
 // DefinitionsForType returns all definitions that profile the given base type.
 // The first entry is the base definition when the package ships it; otherwise
 // it is a profile.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -141,6 +142,76 @@ func TestLoadPackageTgz(t *testing.T) {
 	}
 	if _, ok := reg.Definition("http://hl7.org.au/fhir/StructureDefinition/au-patient"); !ok {
 		t.Error("au-patient not found from tgz")
+	}
+}
+
+// TestStructureDefinitions verifies that StructureDefinitions returns every
+// indexed StructureDefinition, sorted by canonical URL.
+func TestStructureDefinitions(t *testing.T) {
+	reg := NewRegistry()
+	// Register three definitions out of order.
+	reg.byURL["http://example.org/StructureDefinition/c"] = &StructureDefinition{URL: "http://example.org/StructureDefinition/c", Type: "Foo"}
+	reg.byURL["http://example.org/StructureDefinition/a"] = &StructureDefinition{URL: "http://example.org/StructureDefinition/a", Type: "Foo"}
+	reg.byURL["http://example.org/StructureDefinition/b"] = &StructureDefinition{URL: "http://example.org/StructureDefinition/b", Type: "Bar"}
+
+	defs := reg.StructureDefinitions()
+	if len(defs) != 3 {
+		t.Fatalf("got %d definitions, want 3", len(defs))
+	}
+	// Must be sorted by URL.
+	for i := 1; i < len(defs); i++ {
+		if defs[i-1].URL >= defs[i].URL {
+			t.Errorf("definitions not sorted: %s before %s", defs[i-1].URL, defs[i].URL)
+		}
+	}
+	// Must contain all three URLs.
+	got := map[string]bool{}
+	for _, d := range defs {
+		got[d.URL] = true
+	}
+	for _, want := range []string{
+		"http://example.org/StructureDefinition/a",
+		"http://example.org/StructureDefinition/b",
+		"http://example.org/StructureDefinition/c",
+	} {
+		if !got[want] {
+			t.Errorf("missing definition %s", want)
+		}
+	}
+}
+
+// TestStructureDefinitionsEmpty verifies that an empty registry returns an
+// empty (non-nil) slice.
+func TestStructureDefinitionsEmpty(t *testing.T) {
+	reg := NewRegistry()
+	defs := reg.StructureDefinitions()
+	if defs == nil {
+		t.Fatal("expected non-nil empty slice")
+	}
+	if len(defs) != 0 {
+		t.Fatalf("got %d definitions, want 0", len(defs))
+	}
+}
+
+// TestStructureDefinitionsSorted verifies the returned slice is sorted even
+// when definitions are added in arbitrary order.
+func TestStructureDefinitionsSorted(t *testing.T) {
+	reg := NewRegistry()
+	urls := []string{
+		"http://example.org/StructureDefinition/z",
+		"http://example.org/StructureDefinition/a",
+		"http://example.org/StructureDefinition/m",
+	}
+	for _, u := range urls {
+		reg.byURL[u] = &StructureDefinition{URL: u, Type: "Foo"}
+	}
+	defs := reg.StructureDefinitions()
+	got := make([]string, 0, len(defs))
+	for _, d := range defs {
+		got = append(got, d.URL)
+	}
+	if !sort.StringsAreSorted(got) {
+		t.Errorf("StructureDefinitions not sorted: %v", got)
 	}
 }
 

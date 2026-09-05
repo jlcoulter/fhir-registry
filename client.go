@@ -14,6 +14,20 @@ import (
 	"strings"
 )
 
+// ConflictPolicy controls how package version conflicts are resolved when the
+// same package is requested at different versions during dependency
+// resolution.
+type ConflictPolicy string
+
+const (
+	// ConflictPolicyStrict fails when a package is requested at a version that
+	// conflicts with an already-selected version.
+	ConflictPolicyStrict ConflictPolicy = "strict"
+	// ConflictPolicyRootWins keeps the first-selected version and overrides
+	// later conflicting requests.
+	ConflictPolicyRootWins ConflictPolicy = "root-wins"
+)
+
 // PackageClient downloads FHIR packages from a registry server and caches
 // them locally in a FHIR-standard layout: <cacheDir>/<name>#<version>/package/.
 type PackageClient struct {
@@ -21,9 +35,18 @@ type PackageClient struct {
 	CacheDir string
 	// HTTPClient is the transport used for all requests.
 	HTTPClient *http.Client
+	// LocalArchives maps a package key ("name@version") to a local .tgz/.tar.gz
+	// archive path. When set, Download prefers these archives over the network.
+	LocalArchives map[string]string
+	// ConflictPolicy controls version-conflict resolution. Empty defaults to
+	// ConflictPolicyRootWins.
+	ConflictPolicy ConflictPolicy
 	// registryURLs are the package registry roots, tried in order. The first
 	// that returns usable metadata wins.
 	registryURLs []string
+	// selectedVersions records the version chosen for each package name during
+	// dependency resolution, used to apply the conflict policy.
+	selectedVersions map[string]string
 }
 
 // NewPackageClient returns a client with sensible defaults. It returns an
@@ -47,6 +70,126 @@ func NewPackageClient() (*PackageClient, error) {
 // PackageDir returns the local directory for a package (even if not yet present).
 func (c *PackageClient) PackageDir(name, version string) string {
 	return filepath.Join(c.CacheDir, name+"#"+version)
+}
+
+// IndexLocalArchives scans a directory recursively for package archives
+// (.tgz/.tar.gz), reads each archive's package.json manifest, and indexes the
+// archives by "name@version" in LocalArchives. A non-existent directory is not
+// an error (it indexes nothing). Existing entries are not overwritten.
+func (c *PackageClient) IndexLocalArchives(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if c.LocalArchives == nil {
+		c.LocalArchives = make(map[string]string)
+	}
+	return filepath.WalkDir(dir, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		l := strings.ToLower(p)
+		if !strings.HasSuffix(l, ".tgz") && !strings.HasSuffix(l, ".tar.gz") {
+			return nil
+		}
+		manifest, err := readPackageManifestFromArchive(p)
+		if err != nil {
+			return nil // skip archives without a readable manifest
+		}
+		if manifest.Name == "" || manifest.Version == "" {
+			return nil
+		}
+		key := manifest.Name + "@" + manifest.Version
+		if _, exists := c.LocalArchives[key]; !exists {
+			c.LocalArchives[key] = p
+		}
+		return nil
+	})
+}
+
+// readPackageManifestFromArchive reads the package.json manifest from a .tgz
+// archive.
+func readPackageManifestFromArchive(archivePath string) (*packageManifest, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		if strings.ToLower(filepath.Base(hdr.Name)) != "package.json" {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, err
+		}
+		var m packageManifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, err
+		}
+		return &m, nil
+	}
+	return nil, fmt.Errorf("package.json not found in %s", archivePath)
+}
+
+// resolveLocalArchive returns the local archive path for a package name and
+// version reference, resolving floating versions against the local index. It
+// returns ("", false) when no local archive matches.
+func (c *PackageClient) resolveLocalArchive(name, versionRef string) (string, string, bool) {
+	if len(c.LocalArchives) == 0 {
+		return "", "", false
+	}
+	// Exact version match first.
+	if versionRef != "" && !isFloatingVersion(versionRef) {
+		if p, ok := c.LocalArchives[name+"@"+versionRef]; ok {
+			return versionRef, p, true
+		}
+	}
+	// Floating or unspecified version: pick the single matching archive, or
+	// the newest when multiple match.
+	var bestPath string
+	var bestVersion string
+	for key, p := range c.LocalArchives {
+		if !strings.HasPrefix(key, name+"@") {
+			continue
+		}
+		v := strings.TrimPrefix(key, name+"@")
+		if versionRef != "" && !isFloatingVersion(versionRef) && v != versionRef {
+			continue
+		}
+		if bestVersion == "" || versionNewer(v, bestVersion) {
+			bestVersion = v
+			bestPath = p
+		}
+	}
+	if bestPath == "" {
+		return "", "", false
+	}
+	return bestVersion, bestPath, true
 }
 
 // Cached reports whether a package is already extracted in the cache.
@@ -202,12 +345,50 @@ func versionParts(v string) [3]int {
 // Download resolves a version reference (exact, wildcard, or floating) to an
 // exact version, fetches its tarball from the registry, and extracts it into
 // the cache. It returns the resolved version and the cache directory. It is a
-// no-op if the resolved package is already cached.
+// no-op if the resolved package is already cached. When a matching local
+// archive is indexed, it is used instead of the network.
 func (c *PackageClient) Download(ctx context.Context, name, versionRef string) (resolvedVersion string, cacheDir string, err error) {
+	// Apply the conflict policy: if a version was already selected for this
+	// package, honour it.
+	if c.selectedVersions == nil {
+		c.selectedVersions = make(map[string]string)
+	}
+	if selected, ok := c.selectedVersions[name]; ok {
+		if selected != versionRef && !isFloatingVersion(versionRef) {
+			if c.ConflictPolicy == ConflictPolicyStrict {
+				return "", "", fmt.Errorf("version conflict for package %s: %s vs %s", name, selected, versionRef)
+			}
+			// Root-wins: keep the selected version.
+			versionRef = selected
+		}
+	}
+
+	// Prefer a local archive when one matches.
+	if localVersion, localPath, ok := c.resolveLocalArchive(name, versionRef); ok {
+		c.selectedVersions[name] = localVersion
+		dir := c.PackageDir(name, localVersion)
+		if !c.Cached(name, localVersion) {
+			if err := os.MkdirAll(c.CacheDir, 0o755); err != nil {
+				return "", "", err
+			}
+			f, err := os.Open(localPath)
+			if err != nil {
+				return "", "", err
+			}
+			err = extractTGZToDir(f, dir)
+			f.Close()
+			if err != nil {
+				return "", "", fmt.Errorf("extracting local archive %s: %w", localPath, err)
+			}
+		}
+		return localVersion, dir, nil
+	}
+
 	resolvedVersion, tarballURL, err := c.resolveVersionAndTarball(ctx, name, versionRef)
 	if err != nil {
 		return "", "", err
 	}
+	c.selectedVersions[name] = resolvedVersion
 	dir := c.PackageDir(name, resolvedVersion)
 	if c.Cached(name, resolvedVersion) {
 		return resolvedVersion, dir, nil
