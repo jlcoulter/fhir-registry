@@ -377,3 +377,175 @@ func TestOverlayMaxReplacement(t *testing.T) {
 		t.Errorf("max = %s, want \"*\"", got.Max)
 	}
 }
+
+// TestOverlayMustSupport verifies that a differential mustSupport overrides the
+// base, and an absent mustSupport leaves the base untouched.
+func TestOverlayMustSupport(t *testing.T) {
+	base := []RawElement{
+		{ID: "R", Path: "R"},
+		{ID: "R.ms", Path: "R.ms", Min: intptr(0), Max: json.RawMessage(`"1"`)},
+	}
+	diff := []RawElement{
+		{ID: "R.ms", Path: "R.ms", MustSupport: boolptr(true)},
+	}
+	merged := MergeDifferential(base, diff)
+	var got *RawElement
+	for i := range merged {
+		if merged[i].ID == "R.ms" {
+			got = &merged[i]
+		}
+	}
+	if got == nil || got.MustSupport == nil || !*got.MustSupport {
+		t.Errorf("R.ms mustSupport = %+v, want true", got.MustSupport)
+	}
+
+	// Absent mustSupport preserves base.
+	base2 := []RawElement{
+		{ID: "R", Path: "R"},
+		{ID: "R.ms", Path: "R.ms", Min: intptr(0), Max: json.RawMessage(`"1"`), MustSupport: boolptr(true)},
+	}
+	diff2 := []RawElement{{ID: "R.ms", Path: "R.ms"}}
+	merged2 := MergeDifferential(base2, diff2)
+	for i := range merged2 {
+		if merged2[i].ID == "R.ms" {
+			got = &merged2[i]
+		}
+	}
+	if got == nil || got.MustSupport == nil || !*got.MustSupport {
+		t.Errorf("R.ms mustSupport = %+v, want true (preserved)", got.MustSupport)
+	}
+}
+
+// TestOverlayBaseMax verifies that a differential base block replaces the base.
+func TestOverlayBaseMax(t *testing.T) {
+	base := []RawElement{
+		{ID: "R", Path: "R"},
+		{ID: "R.b", Path: "R.b", Min: intptr(0), Max: json.RawMessage(`"1"`), Base: &RawBase{Min: intptr(0), Max: json.RawMessage(`"1"`)}},
+	}
+	diff := []RawElement{
+		{ID: "R.b", Path: "R.b", Base: &RawBase{Min: intptr(0), Max: json.RawMessage(`"*"`)}},
+	}
+	merged := MergeDifferential(base, diff)
+	var got *RawElement
+	for i := range merged {
+		if merged[i].ID == "R.b" {
+			got = &merged[i]
+		}
+	}
+	if got == nil || got.Base == nil || string(got.Base.Max) != `"*"` {
+		t.Errorf("R.b base = %+v, want max \"*\"", got.Base)
+	}
+}
+
+// TestOverlayConstraints verifies that a differential constraint list replaces
+// the base list.
+func TestOverlayConstraints(t *testing.T) {
+	base := []RawElement{
+		{ID: "R", Path: "R"},
+		{ID: "R.c", Path: "R.c", Min: intptr(0), Max: json.RawMessage(`"1"`),
+			Constraint: []RawConstraint{{Key: "base-1"}}},
+	}
+	diff := []RawElement{
+		{ID: "R.c", Path: "R.c", Constraint: []RawConstraint{{Key: "profile-1"}, {Key: "profile-2"}}},
+	}
+	merged := MergeDifferential(base, diff)
+	var got *RawElement
+	for i := range merged {
+		if merged[i].ID == "R.c" {
+			got = &merged[i]
+		}
+	}
+	if got == nil || len(got.Constraint) != 2 || got.Constraint[0].Key != "profile-1" {
+		t.Errorf("R.c constraint = %+v, want [profile-1 profile-2]", got.Constraint)
+	}
+}
+
+// TestOverlayFixed verifies that a differential fixed value replaces the base.
+func TestOverlayFixed(t *testing.T) {
+	base := []RawElement{
+		{ID: "R", Path: "R"},
+		{ID: "R.f", Path: "R.f", Min: intptr(0), Max: json.RawMessage(`"1"`), Fixed: "http://base"},
+	}
+	diff := []RawElement{
+		{ID: "R.f", Path: "R.f", Fixed: "http://profile"},
+	}
+	merged := MergeDifferential(base, diff)
+	var got *RawElement
+	for i := range merged {
+		if merged[i].ID == "R.f" {
+			got = &merged[i]
+		}
+	}
+	if got == nil || got.Fixed != "http://profile" {
+		t.Errorf("R.f fixed = %#v, want http://profile", got.Fixed)
+	}
+}
+
+// TestOverlayPattern verifies that a differential pattern replaces the base.
+func TestOverlayPattern(t *testing.T) {
+	base := []RawElement{
+		{ID: "R", Path: "R"},
+		{ID: "R.p", Path: "R.p", Min: intptr(0), Max: json.RawMessage(`"1"`), Pattern: "base"},
+	}
+	diff := []RawElement{
+		{ID: "R.p", Path: "R.p", Pattern: "profile"},
+	}
+	merged := MergeDifferential(base, diff)
+	var got *RawElement
+	for i := range merged {
+		if merged[i].ID == "R.p" {
+			got = &merged[i]
+		}
+	}
+	if got == nil || got.Pattern != "profile" {
+		t.Errorf("R.p pattern = %#v, want profile", got.Pattern)
+	}
+}
+
+// TestOverlayExamples verifies that a differential example list replaces the
+// base list.
+func TestOverlayExamples(t *testing.T) {
+	base := []RawElement{
+		{ID: "R", Path: "R"},
+		{ID: "R.e", Path: "R.e", Min: intptr(0), Max: json.RawMessage(`"1"`), Examples: []any{"base"}},
+	}
+	diff := []RawElement{
+		{ID: "R.e", Path: "R.e", Examples: []any{"profile"}},
+	}
+	merged := MergeDifferential(base, diff)
+	var got *RawElement
+	for i := range merged {
+		if merged[i].ID == "R.e" {
+			got = &merged[i]
+		}
+	}
+	if got == nil || len(got.Examples) != 1 || got.Examples[0] != "profile" {
+		t.Errorf("R.e examples = %#v, want [profile]", got.Examples)
+	}
+}
+
+// TestOverlayProfileTargetProfile verifies that differential profile and
+// targetProfile lists replace the base lists.
+func TestOverlayProfileTargetProfile(t *testing.T) {
+	base := []RawElement{
+		{ID: "R", Path: "R"},
+		{ID: "R.p", Path: "R.p", Min: intptr(0), Max: json.RawMessage(`"1"`),
+			Profile: []string{"http://base"}, TargetProfile: []string{"http://base-t"}},
+	}
+	diff := []RawElement{
+		{ID: "R.p", Path: "R.p", Profile: []string{"http://profile"}, TargetProfile: []string{"http://profile-t"}},
+	}
+	merged := MergeDifferential(base, diff)
+	var got *RawElement
+	for i := range merged {
+		if merged[i].ID == "R.p" {
+			got = &merged[i]
+		}
+	}
+	if got == nil || len(got.Profile) != 1 || got.Profile[0] != "http://profile" {
+		t.Errorf("R.p profile = %v, want [http://profile]", got.Profile)
+	}
+	if got == nil || len(got.TargetProfile) != 1 || got.TargetProfile[0] != "http://profile-t" {
+		t.Errorf("R.p targetProfile = %v, want [http://profile-t]", got.TargetProfile)
+	}
+}
