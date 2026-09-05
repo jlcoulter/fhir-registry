@@ -386,6 +386,9 @@ type Registry struct {
 	searchParamIndex map[string]*SearchParameter
 	// resources indexes generic Resources by resource type.
 	resources map[string][]*Resource
+	// scope narrows which resources are indexed. A nil scope indexes
+	// everything. It must be set before any Load* call.
+	scope *Scope
 }
 
 // NewRegistry returns an empty registry.
@@ -487,6 +490,9 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if sd.URL == "" {
 			return nil
 		}
+		if r.scope != nil && !r.scope.AllowsStructureDefinition(&sd) {
+			return nil
+		}
 		r.mu.Lock()
 		r.byURL[sd.URL] = &sd
 		if sd.Type != "" {
@@ -501,6 +507,9 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if vs.URL == "" {
 			return nil
 		}
+		if r.scope != nil && !r.scope.AllowsValueSet() {
+			return nil
+		}
 		r.mu.Lock()
 		r.valueSets[vs.URL] = &vs
 		r.mu.Unlock()
@@ -512,6 +521,9 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if cs.URL == "" {
 			return nil
 		}
+		if r.scope != nil && !r.scope.AllowsCodeSystem() {
+			return nil
+		}
 		r.mu.Lock()
 		r.codeSystems[cs.URL] = &cs
 		r.mu.Unlock()
@@ -520,6 +532,9 @@ func (r *Registry) addResource(name string, data []byte) error {
 		if err := json.Unmarshal(data, &cs); err != nil {
 			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
 		}
+		if r.scope != nil && !r.scope.AllowsCapabilityStatement() {
+			return nil
+		}
 		r.mu.Lock()
 		r.capabilityStatements = append(r.capabilityStatements, &cs)
 		r.mu.Unlock()
@@ -527,6 +542,9 @@ func (r *Registry) addResource(name string, data []byte) error {
 		var sp SearchParameter
 		if err := json.Unmarshal(data, &sp); err != nil {
 			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if r.scope != nil && !r.scope.AllowsSearchParam(&sp) {
+			return nil
 		}
 		r.mu.Lock()
 		r.searchParams = append(r.searchParams, &sp)
@@ -541,6 +559,9 @@ func (r *Registry) addResource(name string, data []byte) error {
 		}
 		resourceType, _ := raw["resourceType"].(string)
 		if resourceType == "" {
+			return nil
+		}
+		if r.scope != nil && !r.scope.AllowsGenericResource(resourceType) {
 			return nil
 		}
 		res := &Resource{
