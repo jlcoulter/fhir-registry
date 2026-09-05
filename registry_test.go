@@ -4,9 +4,11 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -140,6 +142,76 @@ func TestLoadPackageTgz(t *testing.T) {
 	}
 	if _, ok := reg.Definition("http://hl7.org.au/fhir/StructureDefinition/au-patient"); !ok {
 		t.Error("au-patient not found from tgz")
+	}
+}
+
+// TestStructureDefinitions verifies that StructureDefinitions returns every
+// indexed StructureDefinition, sorted by canonical URL.
+func TestStructureDefinitions(t *testing.T) {
+	reg := NewRegistry()
+	// Register three definitions out of order.
+	reg.byURL["http://example.org/StructureDefinition/c"] = &StructureDefinition{URL: "http://example.org/StructureDefinition/c", Type: "Foo"}
+	reg.byURL["http://example.org/StructureDefinition/a"] = &StructureDefinition{URL: "http://example.org/StructureDefinition/a", Type: "Foo"}
+	reg.byURL["http://example.org/StructureDefinition/b"] = &StructureDefinition{URL: "http://example.org/StructureDefinition/b", Type: "Bar"}
+
+	defs := reg.StructureDefinitions()
+	if len(defs) != 3 {
+		t.Fatalf("got %d definitions, want 3", len(defs))
+	}
+	// Must be sorted by URL.
+	for i := 1; i < len(defs); i++ {
+		if defs[i-1].URL >= defs[i].URL {
+			t.Errorf("definitions not sorted: %s before %s", defs[i-1].URL, defs[i].URL)
+		}
+	}
+	// Must contain all three URLs.
+	got := map[string]bool{}
+	for _, d := range defs {
+		got[d.URL] = true
+	}
+	for _, want := range []string{
+		"http://example.org/StructureDefinition/a",
+		"http://example.org/StructureDefinition/b",
+		"http://example.org/StructureDefinition/c",
+	} {
+		if !got[want] {
+			t.Errorf("missing definition %s", want)
+		}
+	}
+}
+
+// TestStructureDefinitionsEmpty verifies that an empty registry returns an
+// empty (non-nil) slice.
+func TestStructureDefinitionsEmpty(t *testing.T) {
+	reg := NewRegistry()
+	defs := reg.StructureDefinitions()
+	if defs == nil {
+		t.Fatal("expected non-nil empty slice")
+	}
+	if len(defs) != 0 {
+		t.Fatalf("got %d definitions, want 0", len(defs))
+	}
+}
+
+// TestStructureDefinitionsSorted verifies the returned slice is sorted even
+// when definitions are added in arbitrary order.
+func TestStructureDefinitionsSorted(t *testing.T) {
+	reg := NewRegistry()
+	urls := []string{
+		"http://example.org/StructureDefinition/z",
+		"http://example.org/StructureDefinition/a",
+		"http://example.org/StructureDefinition/m",
+	}
+	for _, u := range urls {
+		reg.byURL[u] = &StructureDefinition{URL: u, Type: "Foo"}
+	}
+	defs := reg.StructureDefinitions()
+	got := make([]string, 0, len(defs))
+	for _, d := range defs {
+		got = append(got, d.URL)
+	}
+	if !sort.StringsAreSorted(got) {
+		t.Errorf("StructureDefinitions not sorted: %v", got)
 	}
 }
 
@@ -423,6 +495,39 @@ func TestBuildTreeDifferentialOnlyWithBase(t *testing.T) {
 	}
 }
 
+// TestNewStructureDefinition verifies that NewStructureDefinition builds a
+// definition whose snapshot round-trips the given elements through the tree.
+func TestNewStructureDefinition(t *testing.T) {
+	sd := NewStructureDefinition(
+		"http://example.org/StructureDefinition/foo",
+		"Foo",
+		"Foo",
+		"resource",
+		"",
+		"",
+		[]ElementDefinition{
+			{ID: "Foo", Path: "Foo", Min: 0, Max: 1},
+			{ID: "Foo.bar", Path: "Foo.bar", Min: 1, Max: MaxUnbounded, Types: []ElementType{{Code: "string"}}},
+		},
+	)
+	if sd.Snapshot == nil || len(sd.Snapshot.Elements) != 2 {
+		t.Fatalf("snapshot = %+v", sd.Snapshot)
+	}
+	tree, err := BuildTree(sd)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	if tree.Root == nil || tree.Root.Path != "Foo" {
+		t.Fatalf("root = %v", tree.Root)
+	}
+	if len(tree.Root.Children) != 1 || tree.Root.Children[0].Path != "Foo.bar" {
+		t.Fatalf("children = %+v", tree.Root.Children)
+	}
+	if tree.Root.Children[0].Max != MaxUnbounded {
+		t.Errorf("bar max = %v, want unbounded", tree.Root.Children[0].Max)
+	}
+}
+
 func TestBuildTreeElementsChildLinking(t *testing.T) {
 	sd := &StructureDefinition{ID: "link", Type: "Foo"}
 	raws := []RawElement{
@@ -600,6 +705,105 @@ func TestChoiceName(t *testing.T) {
 	}
 	if got := ChoiceName(elem, "dateTime"); got != "deceasedDateTime" {
 		t.Errorf("ChoiceName(dateTime) = %s", got)
+	}
+}
+
+// TestLookupPathExact verifies that LookupPath resolves a top-level relative
+// path to its element definition.
+func TestLookupPathExact(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("birthDate")
+	if err != nil {
+		t.Fatalf("LookupPath(birthDate): %v", err)
+	}
+	if elem.Path != "Patient.birthDate" {
+		t.Errorf("elem.Path = %q, want Patient.birthDate", elem.Path)
+	}
+}
+
+// TestLookupPathNested verifies that LookupPath resolves a nested relative
+// path (e.g. address.city) to its element definition, resolving the complex
+// type through the registry.
+func TestLookupPathNested(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("address.city")
+	if err != nil {
+		t.Fatalf("LookupPath(address.city): %v", err)
+	}
+	if elem.Path != "Address.city" {
+		t.Errorf("elem.Path = %q, want Address.city", elem.Path)
+	}
+}
+
+// TestLookupPathNotFound verifies that LookupPath returns ErrPathNotFound for
+// an unknown relative path.
+func TestLookupPathNotFound(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	if _, err := tree.LookupPath("nonexistent"); !errors.Is(err, ErrPathNotFound) {
+		t.Errorf("LookupPath(nonexistent) err = %v, want ErrPathNotFound", err)
+	}
+}
+
+// TestLookupPathChoiceConcrete verifies that LookupPath resolves a concrete
+// type-suffixed key (e.g. deceasedBoolean) to the underlying choice element.
+func TestLookupPathChoiceConcrete(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("deceasedBoolean")
+	if err != nil {
+		t.Fatalf("LookupPath(deceasedBoolean): %v", err)
+	}
+	if elem.Path != "Patient.deceased[x]" {
+		t.Errorf("elem.Path = %q, want Patient.deceased[x]", elem.Path)
+	}
+}
+
+// TestLookupPathChoiceUnsuffixed verifies that LookupPath resolves the
+// unsuffixed choice path (e.g. deceased[x]) directly.
+func TestLookupPathChoiceUnsuffixed(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("deceased[x]")
+	if err != nil {
+		t.Fatalf("LookupPath(deceased[x]): %v", err)
+	}
+	if elem.Path != "Patient.deceased[x]" {
+		t.Errorf("elem.Path = %q, want Patient.deceased[x]", elem.Path)
+	}
+}
+
+// TestLookupPathResourceRoot verifies that LookupPath with an empty path
+// returns the tree root.
+func TestLookupPathResourceRoot(t *testing.T) {
+	reg := loadTestRegistry(t)
+	tree, err := reg.TreeForType("Patient")
+	if err != nil {
+		t.Fatalf("TreeForType: %v", err)
+	}
+	elem, err := tree.LookupPath("")
+	if err != nil {
+		t.Fatalf("LookupPath(\"\"): %v", err)
+	}
+	if elem != tree.Root {
+		t.Errorf("LookupPath(\"\") did not return the tree root")
 	}
 }
 

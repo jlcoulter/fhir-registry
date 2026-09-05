@@ -1,3 +1,30 @@
+// Package fhir loads, indexes, and reasons about FHIR structure definitions.
+// It is the single source of truth for FHIR structure knowledge, designed to
+// handle arbitrary implementation guides.
+//
+// The central type is Registry, which indexes every StructureDefinition in a
+// set of FHIR packages by canonical URL and base type, and exposes the element
+// tree for each. Packages can be loaded from a directory or a .tgz archive,
+// and full dependency chains can be resolved from a registry server via
+// PackageClient.
+//
+// Beyond structure definitions, a Registry indexes terminology and conformance
+// resources (ValueSets, CodeSystems, CapabilityStatements, SearchParameters)
+// and any other resource type as an opaque Resource. A Scope narrows which
+// resources are indexed, e.g. to only what a package's CapabilityStatement
+// declares as supported.
+//
+// Typical usage:
+//
+//	reg := fhir.NewRegistry()
+//	if err := reg.LoadPackage("package"); err != nil {
+//	    log.Fatal(err)
+//	}
+//	tree, err := reg.Tree("http://hl7.org/fhir/StructureDefinition/Patient")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	out, report, err := reg.Marshal("Patient", instance)
 package fhir
 
 import (
@@ -81,15 +108,6 @@ type ElementConstraint struct {
 	Source     string
 }
 
-// ElementConstraint is a FHIR invariant (constraint) attached to an element.
-type ElementConstraint struct {
-	Key        string
-	Severity   string
-	Human      string
-	Expression string
-	Source     string
-}
-
 // ElementType represents a single type choice for a FHIR element.
 type ElementType struct {
 	Code          string   `json:"code"`
@@ -140,6 +158,103 @@ type StructureDefinition struct {
 
 type Snapshot struct {
 	Elements []RawElement `json:"element"`
+}
+
+// NewStructureDefinition builds a StructureDefinition whose snapshot is the
+// given flat element list. It is a convenience for constructing definitions
+// programmatically (e.g. in tests) from ElementDefinition values rather than
+// raw JSON. The returned definition's Snapshot is populated; Differential is
+// nil.
+func NewStructureDefinition(url, name, typ, kind, baseDefinition, derivation string, elements []ElementDefinition) *StructureDefinition {
+	raws := make([]RawElement, 0, len(elements))
+	for _, e := range elements {
+		raws = append(raws, rawElementFromDefinition(e))
+	}
+	return &StructureDefinition{
+		URL:            url,
+		Name:           name,
+		Type:           typ,
+		Kind:           kind,
+		BaseDefinition: baseDefinition,
+		Derivation:     derivation,
+		Snapshot:       &Snapshot{Elements: raws},
+	}
+}
+
+// NewStructureDefinitionDiff builds a StructureDefinition whose differential is
+// the given flat element list. This is used for profiles that derive from a base
+// definition, so the registry's ensureSnapshot merges the base.
+func NewStructureDefinitionDiff(url, name, typ, kind, baseDefinition, derivation string, elements []ElementDefinition) *StructureDefinition {
+	raws := make([]RawElement, 0, len(elements))
+	for _, e := range elements {
+		raws = append(raws, rawElementFromDefinition(e))
+	}
+	return &StructureDefinition{
+		URL:            url,
+		Name:           name,
+		Type:           typ,
+		Kind:           kind,
+		BaseDefinition: baseDefinition,
+		Derivation:     derivation,
+		Differential:   &Differential{Elements: raws},
+	}
+}
+
+// rawElementFromDefinition converts an ElementDefinition back into its raw
+// JSON shape so it can be stored in a Snapshot.
+func rawElementFromDefinition(e ElementDefinition) RawElement {
+	min := e.Min
+	ms := e.MustSupport
+	id := e.ID
+	if id == "" && e.Path != "" {
+		id = e.Path
+		if e.SliceName != "" {
+			id = e.Path + ":" + e.SliceName
+		}
+	}
+	raw := RawElement{
+		ID:            id,
+		Path:          e.Path,
+		SliceName:     e.SliceName,
+		Short:         e.Short,
+		Definition:    e.Definition,
+		Comment:       e.Comment,
+		Min:           &min,
+		Max:           json.RawMessage(strconv.Quote(e.Max.String())),
+		MustSupport:   &ms,
+		Profile:       e.Profile,
+		TargetProfile: e.TargetProfile,
+		Fixed:         e.Fixed,
+		Pattern:       e.Pattern,
+		Examples:      e.Examples,
+	}
+	if e.BaseMax != nil {
+		raw.Base = &RawBase{Max: json.RawMessage(strconv.Quote(e.BaseMax.String()))}
+	}
+	for _, t := range e.Types {
+		raw.Types = append(raw.Types, RawType{
+			Code:          t.Code,
+			Profiles:      t.Profiles,
+			TargetProfile: t.TargetProfile,
+		})
+	}
+	if e.Binding != nil {
+		raw.Binding = &RawBinding{
+			Strength:    e.Binding.Strength,
+			Description: e.Binding.Description,
+			ValueSet:    e.Binding.ValueSet,
+		}
+	}
+	for _, c := range e.Constraints {
+		raw.Constraint = append(raw.Constraint, RawConstraint{
+			Key:        c.Key,
+			Severity:   c.Severity,
+			Human:      c.Human,
+			Expression: c.Expression,
+			Source:     c.Source,
+		})
+	}
+	return raw
 }
 
 type Differential struct {
@@ -292,6 +407,11 @@ func ptrBool(b *bool) bool {
 }
 
 // convertRawElement converts a RawElement into a typed ElementDefinition.
+// ConvertElement converts a raw snapshot element into an ElementDefinition.
+func ConvertElement(raw RawElement) (ElementDefinition, error) {
+	return convertRawElement(raw)
+}
+
 func convertRawElement(raw RawElement) (ElementDefinition, error) {
 	maxVal, err := parseMax(raw.Max)
 	if err != nil {
@@ -383,20 +503,47 @@ type Registry struct {
 	byType map[string][]*StructureDefinition
 	// trees caches the built element tree per canonical URL.
 	trees map[string]*ElementTree
+	// valueSets indexes ValueSets by canonical URL.
+	valueSets map[string]*ValueSet
+	// codeSystems indexes CodeSystems by canonical URL.
+	codeSystems map[string]*CodeSystem
+	// capabilityStatements holds all registered CapabilityStatements.
+	capabilityStatements []*CapabilityStatement
+	// searchParams holds all registered SearchParameters.
+	searchParams []*SearchParameter
+	// searchParamIndex maps "resourceType:code" to a SearchParameter.
+	searchParamIndex map[string]*SearchParameter
+	// resources indexes generic Resources by resource type.
+	resources map[string][]*Resource
+	// pendingValueSets buffers ValueSets when ValueSets policy is
+	// ScopeReferenced, until Resolve is called.
+	pendingValueSets map[string]*ValueSet
+	// pendingCodeSystems buffers CodeSystems when CodeSystems policy is
+	// ScopeReferenced, until Resolve is called.
+	pendingCodeSystems map[string]*CodeSystem
+	// Scope narrows which resources are indexed. A nil Scope indexes
+	// everything. It must be set before any Load* call.
+	Scope *Scope
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		byURL:  make(map[string]*StructureDefinition),
-		byType: make(map[string][]*StructureDefinition),
-		trees:  make(map[string]*ElementTree),
+		byURL:              make(map[string]*StructureDefinition),
+		byType:             make(map[string][]*StructureDefinition),
+		trees:              make(map[string]*ElementTree),
+		valueSets:          make(map[string]*ValueSet),
+		codeSystems:        make(map[string]*CodeSystem),
+		searchParamIndex:   make(map[string]*SearchParameter),
+		resources:          make(map[string][]*Resource),
+		pendingValueSets:   make(map[string]*ValueSet),
+		pendingCodeSystems: make(map[string]*CodeSystem),
 	}
 }
 
 // LoadPackage loads every JSON resource in a directory (a FHIR package folder)
 // into the registry. Dependencies are NOT resolved; use LoadPackageWithDeps
-// for that.
+// for that. Non-JSON files and malformed resources are silently skipped.
 func (r *Registry) LoadPackage(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -461,6 +608,11 @@ type ElementTree struct {
 	Root   *ElementDefinition
 	ByPath map[string][]*ElementDefinition
 	ByID   map[string]*ElementDefinition
+
+	// reg is the registry that produced this tree, used to resolve nested
+	// complex-type children (e.g. Patient.name.family) that live in other
+	// structure definitions.
+	reg *Registry
 }
 
 // addResource dispatches a raw JSON resource into the registry.
@@ -471,26 +623,134 @@ func (r *Registry) addResource(name string, data []byte) error {
 	if err := json.Unmarshal(data, &head); err != nil || head.ResourceType == "" {
 		return nil // package.json, .index.json, etc.
 	}
-	if head.ResourceType != "StructureDefinition" {
-		return nil
+	switch head.ResourceType {
+	case "StructureDefinition":
+		var sd StructureDefinition
+		if err := json.Unmarshal(data, &sd); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if sd.URL == "" {
+			return nil
+		}
+		if r.Scope != nil && !r.Scope.AllowsStructureDefinition(&sd) {
+			return nil
+		}
+		r.mu.Lock()
+		r.byURL[sd.URL] = &sd
+		if sd.Type != "" {
+			r.byType[sd.Type] = append(r.byType[sd.Type], &sd)
+		}
+		r.mu.Unlock()
+	case "ValueSet":
+		var vs ValueSet
+		if err := json.Unmarshal(data, &vs); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if vs.URL == "" {
+			return nil
+		}
+		if r.Scope != nil && r.Scope.ValueSets == ScopeReferenced {
+			r.mu.Lock()
+			r.pendingValueSets[vs.URL] = &vs
+			r.mu.Unlock()
+			return nil
+		}
+		if r.Scope != nil && !r.Scope.AllowsValueSet() {
+			return nil
+		}
+		r.mu.Lock()
+		r.valueSets[vs.URL] = &vs
+		r.mu.Unlock()
+	case "CodeSystem":
+		var cs CodeSystem
+		if err := json.Unmarshal(data, &cs); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if cs.URL == "" {
+			return nil
+		}
+		if r.Scope != nil && r.Scope.CodeSystems == ScopeReferenced {
+			r.mu.Lock()
+			r.pendingCodeSystems[cs.URL] = &cs
+			r.mu.Unlock()
+			return nil
+		}
+		if r.Scope != nil && !r.Scope.AllowsCodeSystem() {
+			return nil
+		}
+		r.mu.Lock()
+		r.codeSystems[cs.URL] = &cs
+		r.mu.Unlock()
+	case "CapabilityStatement":
+		var cs CapabilityStatement
+		if err := json.Unmarshal(data, &cs); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if r.Scope != nil && !r.Scope.AllowsCapabilityStatement() {
+			return nil
+		}
+		r.mu.Lock()
+		r.capabilityStatements = append(r.capabilityStatements, &cs)
+		r.mu.Unlock()
+	case "SearchParameter":
+		var sp SearchParameter
+		if err := json.Unmarshal(data, &sp); err != nil {
+			return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
+		}
+		if r.Scope != nil && !r.Scope.AllowsSearchParam(&sp) {
+			return nil
+		}
+		r.mu.Lock()
+		r.searchParams = append(r.searchParams, &sp)
+		for _, base := range sp.Base {
+			r.searchParamIndex[base+":"+sp.Code] = &sp
+		}
+		r.mu.Unlock()
+	default:
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil // not a JSON object resource
+		}
+		resourceType, _ := raw["resourceType"].(string)
+		if resourceType == "" {
+			return nil
+		}
+		if r.Scope != nil && !r.Scope.AllowsGenericResource(resourceType) {
+			return nil
+		}
+		res := &Resource{
+			ResourceType: resourceType,
+			ProfileURLs:  profileURLsOf(raw),
+			Raw:          raw,
+		}
+		r.mu.Lock()
+		r.resources[resourceType] = append(r.resources[resourceType], res)
+		r.mu.Unlock()
 	}
-	var sd StructureDefinition
-	if err := json.Unmarshal(data, &sd); err != nil {
-		return fmt.Errorf("%w: parsing %s: %v", ErrParseFailure, name, err)
-	}
-	if sd.URL == "" {
-		return nil
-	}
-	r.mu.Lock()
-	r.byURL[sd.URL] = &sd
-	if sd.Type != "" {
-		r.byType[sd.Type] = append(r.byType[sd.Type], &sd)
-	}
-	r.mu.Unlock()
 	return nil
 }
 
-// Definition returns the StructureDefinition for a canonical URL.
+// profileURLsOf extracts the meta.profile URLs from a decoded resource map.
+func profileURLsOf(raw map[string]any) []string {
+	meta, ok := raw["meta"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	profiles, ok := meta["profile"].([]any)
+	if !ok {
+		return nil
+	}
+	var urls []string
+	for _, p := range profiles {
+		if s, ok := p.(string); ok {
+			urls = append(urls, s)
+		}
+	}
+	return urls
+}
+
+// Definition returns the StructureDefinition for a canonical URL. The bool
+// reports whether the definition was found.
 func (r *Registry) Definition(url string) (*StructureDefinition, bool) {
 	r.mu.RLock()
 	sd, ok := r.byURL[url]
@@ -498,7 +758,22 @@ func (r *Registry) Definition(url string) (*StructureDefinition, bool) {
 	return sd, ok
 }
 
+// StructureDefinitions returns every indexed StructureDefinition, sorted by
+// canonical URL. The returned slice is a copy owned by the caller.
+func (r *Registry) StructureDefinitions() []*StructureDefinition {
+	r.mu.RLock()
+	out := make([]*StructureDefinition, 0, len(r.byURL))
+	for _, sd := range r.byURL {
+		out = append(out, sd)
+	}
+	r.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].URL < out[j].URL })
+	return out
+}
+
 // DefinitionsForType returns all definitions that profile the given base type.
+// The first entry is the base definition when the package ships it; otherwise
+// it is a profile.
 func (r *Registry) DefinitionsForType(typeName string) []*StructureDefinition {
 	r.mu.RLock()
 	defs := r.byType[typeName]
@@ -543,6 +818,7 @@ func (r *Registry) Tree(url string) (*ElementTree, error) {
 	if err != nil {
 		return nil, err
 	}
+	t.reg = r
 	r.trees[url] = t
 	return t, nil
 }
@@ -728,12 +1004,20 @@ func parentIDOf(id string) string {
 // Cardinality helpers
 // ---------------------------------------------------------------------------
 
-func IsMulti(elem *ElementDefinition) bool    { return elem.Max.IsUnbounded() }
+// IsMulti reports whether the element has unbounded upper cardinality
+// (max = "*").
+func IsMulti(elem *ElementDefinition) bool { return elem.Max.IsUnbounded() }
+
+// IsRequired reports whether the element has a non-zero minimum cardinality.
 func IsRequired(elem *ElementDefinition) bool { return elem.Min > 0 }
+
+// Cardinality returns the FHIR cardinality string for the element, e.g. "0..*".
 func Cardinality(elem *ElementDefinition) string {
 	return fmt.Sprintf("%d..%s", elem.Min, elem.Max)
 }
 
+// PrimaryTypeCode returns the code of the element's first type choice, or the
+// empty string if the element has no types.
 func PrimaryTypeCode(elem *ElementDefinition) string {
 	if len(elem.Types) == 0 {
 		return ""
@@ -759,4 +1043,81 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// LookupPath resolves a relative element path (e.g. "name.family",
+// "birthDate") against the tree, returning the matching element definition.
+// The path is relative to the resource root (the tree's Root.Path). An empty
+// path returns the root element. A concrete type-suffixed key of a choice
+// element (e.g. "deceasedBoolean" for "deceased[x]") resolves to the choice
+// element itself. Nested complex-type children (e.g. "name.family") are
+// resolved through the registry. It returns ErrPathNotFound when the path does
+// not exist.
+func (t *ElementTree) LookupPath(relPath string) (*ElementDefinition, error) {
+	if relPath == "" {
+		return t.Root, nil
+	}
+	segs := strings.Split(relPath, ".")
+	cur := t.Root
+	for i, seg := range segs {
+		last := i == len(segs)-1
+		child, ok := t.child(cur, seg)
+		if !ok {
+			// The segment may be a concrete type-suffixed key of a choice
+			// element (e.g. "deceasedBoolean" for "deceased[x]").
+			if last {
+				if choice, ok := t.choiceFor(cur, seg); ok {
+					return choice, nil
+				}
+			}
+			return nil, fmt.Errorf("%w: %s", ErrPathNotFound, relPath)
+		}
+		if last {
+			return child, nil
+		}
+		cur = child
+	}
+	return nil, fmt.Errorf("%w: %s", ErrPathNotFound, relPath)
+}
+
+// child returns the direct child element of elem whose last path segment
+// matches seg, resolving complex-type children through the registry when the
+// element has no in-tree children.
+func (t *ElementTree) child(elem *ElementDefinition, seg string) (*ElementDefinition, bool) {
+	children := elem.Children
+	if len(children) == 0 && t.reg != nil {
+		if resolved, ok := t.reg.ResolveType(PrimaryTypeCode(elem), profilesOf(elem)); ok {
+			children = resolved.Root.Children
+		}
+	}
+	for _, c := range children {
+		if lastSegment(c.Path) == seg {
+			return c, true
+		}
+	}
+	return nil, false
+}
+
+// choiceFor returns the choice element under elem whose concrete type-suffixed
+// key matches seg (e.g. seg "deceasedBoolean" matches the "deceased[x]" choice
+// with a boolean type).
+func (t *ElementTree) choiceFor(elem *ElementDefinition, seg string) (*ElementDefinition, bool) {
+	children := elem.Children
+	if len(children) == 0 && t.reg != nil {
+		if resolved, ok := t.reg.ResolveType(PrimaryTypeCode(elem), profilesOf(elem)); ok {
+			children = resolved.Root.Children
+		}
+	}
+	for _, c := range children {
+		if !IsChoice(c) {
+			continue
+		}
+		base := strings.TrimSuffix(lastSegment(c.Path), "[x]")
+		for _, ty := range c.Types {
+			if base+capitalize(ty.Code) == seg {
+				return c, true
+			}
+		}
+	}
+	return nil, false
 }

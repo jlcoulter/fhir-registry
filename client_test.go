@@ -1,6 +1,9 @@
 package fhir
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 )
@@ -22,8 +25,14 @@ func TestNewPackageClient(t *testing.T) {
 	if client.CacheDir != want {
 		t.Errorf("CacheDir = %q, want %q", client.CacheDir, want)
 	}
-	if client.RegistryURL == "" || client.TarballURL == "" || client.HTTPClient == nil {
-		t.Errorf("defaults not set: %+v", client)
+	if client.HTTPClient == nil {
+		t.Errorf("HTTPClient not set: %+v", client)
+	}
+	if len(client.registryURLs) == 0 {
+		t.Errorf("registryURLs not set: %+v", client)
+	}
+	if client.registryURLs[0] != "https://packages2.fhir.org/packages" {
+		t.Errorf("primary registryURL = %q, want packages2.fhir.org", client.registryURLs[0])
 	}
 }
 
@@ -85,5 +94,138 @@ func TestVersionParts(t *testing.T) {
 		if got := versionParts(tc.v); got != tc.want {
 			t.Errorf("versionParts(%q) = %v, want %v", tc.v, got, tc.want)
 		}
+	}
+}
+
+// TestIsFloatingVersion verifies detection of floating version references.
+func TestIsFloatingVersion(t *testing.T) {
+	cases := []struct {
+		v    string
+		want bool
+	}{
+		{"current", true},
+		{"latest", true},
+		{"*", true},
+		{"CURRENT", true},
+		{"Current", true},
+		{"  current  ", true},
+		{"4.0.1", false},
+		{"4.0.x", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isFloatingVersion(tc.v); got != tc.want {
+			t.Errorf("isFloatingVersion(%q) = %v, want %v", tc.v, got, tc.want)
+		}
+	}
+}
+
+// TestFloatingVersionTag verifies mapping of floating references to dist-tags.
+func TestFloatingVersionTag(t *testing.T) {
+	cases := []struct {
+		v    string
+		want string
+	}{
+		{"current", "latest"},
+		{"latest", "latest"},
+		{"*", "*"},
+		{"CURRENT", "latest"},
+	}
+	for _, tc := range cases {
+		if got := floatingVersionTag(tc.v); got != tc.want {
+			t.Errorf("floatingVersionTag(%q) = %q, want %q", tc.v, got, tc.want)
+		}
+	}
+}
+
+// TestResolveVersionAndTarball verifies version resolution against a mock
+// registry, covering exact, wildcard, and floating version references.
+func TestResolveVersionAndTarball(t *testing.T) {
+	meta := `{
+		"dist-tags": {"latest": "4.0.1"},
+		"versions": {
+			"4.0.0": {"dist": {"tarball": "https://reg.example/4.0.0.tgz"}},
+			"4.0.1": {"dist": {"tarball": "https://reg.example/4.0.1.tgz"}},
+			"4.0.2": {"dist": {"tarball": "https://reg.example/4.0.2.tgz"}}
+		}
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(meta))
+	}))
+	defer srv.Close()
+
+	client := &PackageClient{
+		HTTPClient:   srv.Client(),
+		registryURLs: []string{srv.URL},
+	}
+	ctx := context.Background()
+
+	cases := []struct {
+		name, ref   string
+		wantVersion string
+		wantTarball string
+	}{
+		{"pkg", "4.0.1", "4.0.1", "https://reg.example/4.0.1.tgz"},
+		{"pkg", "4.0.x", "4.0.2", "https://reg.example/4.0.2.tgz"},
+		{"pkg", "current", "4.0.1", "https://reg.example/4.0.1.tgz"},
+		{"pkg", "latest", "4.0.1", "https://reg.example/4.0.1.tgz"},
+	}
+	for _, tc := range cases {
+		version, tarball, err := client.resolveVersionAndTarball(ctx, tc.name, tc.ref)
+		if err != nil {
+			t.Errorf("resolveVersionAndTarball(%q): %v", tc.ref, err)
+			continue
+		}
+		if version != tc.wantVersion {
+			t.Errorf("resolveVersionAndTarball(%q) version = %q, want %q", tc.ref, version, tc.wantVersion)
+		}
+		if tarball != tc.wantTarball {
+			t.Errorf("resolveVersionAndTarball(%q) tarball = %q, want %q", tc.ref, tarball, tc.wantTarball)
+		}
+	}
+}
+
+// TestResolveVersionAndTarballFallback verifies that the client tries each
+// registry URL in order until one succeeds.
+func TestResolveVersionAndTarballFallback(t *testing.T) {
+	meta := `{"dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"dist":{"tarball":"https://reg.example/1.0.0.tgz"}}}}`
+	var first, second *httptest.Server
+	first = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer first.Close()
+	second = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(meta))
+	}))
+	defer second.Close()
+
+	client := &PackageClient{
+		HTTPClient:   second.Client(),
+		registryURLs: []string{first.URL, second.URL},
+	}
+	version, tarball, err := client.resolveVersionAndTarball(context.Background(), "pkg", "1.0.0")
+	if err != nil {
+		t.Fatalf("resolveVersionAndTarball: %v", err)
+	}
+	if version != "1.0.0" || tarball != "https://reg.example/1.0.0.tgz" {
+		t.Errorf("got version=%q tarball=%q, want 1.0.0 / https://reg.example/1.0.0.tgz", version, tarball)
+	}
+}
+
+// TestResolveVersionAndTarballAllFail verifies an error when every registry
+// fails.
+func TestResolveVersionAndTarballAllFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	client := &PackageClient{
+		HTTPClient:   srv.Client(),
+		registryURLs: []string{srv.URL},
+	}
+	if _, _, err := client.resolveVersionAndTarball(context.Background(), "pkg", "1.0.0"); err == nil {
+		t.Error("expected error when all registries fail")
 	}
 }

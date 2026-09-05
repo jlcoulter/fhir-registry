@@ -81,6 +81,31 @@ func (r *Registry) LoadPackageWithDeps(ctx context.Context, pkgDir string, clien
 	return r.loadPackageWithDeps(ctx, pkgDir, client, nil)
 }
 
+// LoadPackageTgzWithDeps loads a FHIR package from a .tgz archive and resolves
+// its full dependency chain, downloading any missing dependencies from the
+// registry via the PackageClient. The archive is extracted to a temporary
+// directory, which is removed on return. When the package declares no
+// dependencies, client may be nil.
+func (r *Registry) LoadPackageTgzWithDeps(ctx context.Context, tgzPath string, client *PackageClient) error {
+	dir, err := os.MkdirTemp("", "fhir-pkg-*")
+	if err != nil {
+		return fmt.Errorf("%w: creating temp dir: %v", ErrPackageNotFound, err)
+	}
+	defer os.RemoveAll(dir)
+
+	f, err := os.Open(tgzPath)
+	if err != nil {
+		return fmt.Errorf("%w: opening %s: %v", ErrPackageNotFound, tgzPath, err)
+	}
+	if err := extractTGZToDir(f, dir); err != nil {
+		f.Close()
+		return fmt.Errorf("%w: extracting %s: %v", ErrPackageNotFound, tgzPath, err)
+	}
+	f.Close()
+
+	return r.LoadPackageWithDeps(ctx, dir, client)
+}
+
 // loadPackageWithDeps is the recursive core; visited guards against circular
 // or duplicate dependency processing.
 func (r *Registry) loadPackageWithDeps(ctx context.Context, pkgDir string, client *PackageClient, visited map[string]bool) error {
@@ -113,16 +138,12 @@ func (r *Registry) loadPackageWithDeps(ctx context.Context, pkgDir string, clien
 
 	for _, depName := range names {
 		ref := m.Dependencies[depName]
-		version, err := client.ResolveVersion(ctx, depName, ref)
+		version, depDir, err := client.Download(ctx, depName, ref)
 		if err != nil {
-			return err
+			return fmt.Errorf("dependency %s#%s: %w", depName, ref, err)
 		}
 		if visited[depName+"#"+version] {
 			continue
-		}
-		depDir, err := client.Download(ctx, depName, version)
-		if err != nil {
-			return fmt.Errorf("dependency %s#%s: %w", depName, version, err)
 		}
 		if err := r.loadPackageWithDeps(ctx, depDir, client, visited); err != nil {
 			return fmt.Errorf("dependency %s#%s: %w", depName, version, err)
