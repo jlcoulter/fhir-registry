@@ -1,9 +1,13 @@
 package fhir
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -11,10 +15,47 @@ import (
 func loadTestRegistry(t *testing.T) *Registry {
 	t.Helper()
 	reg := NewRegistry()
-	if err := reg.LoadPackage("package"); err != nil {
-		t.Fatalf("LoadPackage: %v", err)
+	if err := reg.LoadPackageTgz("au-base.tgz"); err != nil {
+		t.Fatalf("LoadPackageTgz: %v", err)
 	}
 	return reg
+}
+
+// readTgzFile reads a single file from the au-base.tgz archive, matching the
+// "package/"-stripped layout used by LoadPackageTgz.
+func readTgzFile(t *testing.T, name string) []byte {
+	t.Helper()
+	f, err := os.Open("au-base.tgz")
+	if err != nil {
+		t.Fatalf("open au-base.tgz: %v", err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		rel, ok := strings.CutPrefix(hdr.Name, "package/")
+		if !ok || rel != name {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return data
+	}
+	t.Fatalf("file %s not found in au-base.tgz", name)
+	return nil
 }
 
 func TestParseMax(t *testing.T) {
@@ -740,10 +781,7 @@ func TestMarshalNested(t *testing.T) {
 
 func TestMarshalExampleRoundTrip(t *testing.T) {
 	reg := loadTestRegistry(t)
-	data, err := os.ReadFile("package/example/Patient-example0.json")
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
+	data := readTgzFile(t, "example/Patient-example0.json")
 	var in map[string]any
 	if err := json.Unmarshal(data, &in); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
