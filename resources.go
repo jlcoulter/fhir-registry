@@ -1,5 +1,7 @@
 package fhir
 
+import "sort"
+
 // ValueSet — a terminology resource defining a set of codes.
 type ValueSet struct {
 	ResourceType string             `json:"resourceType"`
@@ -234,7 +236,8 @@ func (r *Registry) ResourcesForType(resourceType string) []*Resource {
 	return out
 }
 
-// AllResources returns every generic Resource across all resource types.
+// AllResources returns every generic Resource across all resource types,
+// ordered deterministically by resource type.
 func (r *Registry) AllResources() []*Resource {
 	r.mu.RLock()
 	var out []*Resource
@@ -242,5 +245,8 @@ func (r *Registry) AllResources() []*Resource {
 		out = append(out, resources...)
 	}
 	r.mu.RUnlock()
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ResourceType < out[j].ResourceType
+	})
 	return out
 }
