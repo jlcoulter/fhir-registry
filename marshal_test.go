@@ -1,6 +1,7 @@
 package fhir
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -179,5 +180,82 @@ func TestMarshalObjectDuplicateLastSegment(t *testing.T) {
 		if it.Severity == SeverityViolation {
 			t.Errorf("unexpected violation: %+v", it)
 		}
+	}
+}
+
+// TestMarshalExtensionBothValueAndSubExtensions verifies that an Extension
+// carrying both a value[x] and nested sub-extensions is reported as a violation
+// and the value[x] is stripped, satisfying FHIR's ext-1 invariant.
+func TestMarshalExtensionBothValueAndSubExtensions(t *testing.T) {
+	reg := loadTestRegistry(t)
+	instance := map[string]any{
+		"resourceType": "Patient",
+		"extension": []any{
+			map[string]any{
+				"url":         "http://example.org/StructureDefinition/Ext",
+				"valueString": "some-value",
+				"extension": []any{
+					map[string]any{"url": "sub", "valueString": "nested"},
+				},
+			},
+		},
+	}
+	out, rep, err := reg.Marshal("Patient", instance)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var found bool
+	for _, it := range rep.Items {
+		if it.Severity == SeverityViolation && strings.Contains(it.Message, "must not have both a value") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a violation for extension with both value and sub-extensions, got %+v", rep.Items)
+	}
+
+	exts, ok := out["extension"].([]any)
+	if !ok || len(exts) != 1 {
+		t.Fatalf("extension = %#v, want []any of length 1", out["extension"])
+	}
+	ext, ok := exts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("extension item = %#v, want map", exts[0])
+	}
+	if _, ok := ext["valueString"]; ok {
+		t.Error("valueString should have been removed from output")
+	}
+	if _, ok := ext["extension"]; !ok {
+		t.Error("extension should still be present in output")
+	}
+}
+
+// TestMarshalSimpleExtensionKeepsValue verifies that a simple extension (value
+// but no sub-extensions) is left untouched.
+func TestMarshalSimpleExtensionKeepsValue(t *testing.T) {
+	reg := loadTestRegistry(t)
+	instance := map[string]any{
+		"resourceType": "Patient",
+		"extension": []any{
+			map[string]any{
+				"url":         "http://example.org/StructureDefinition/Ext",
+				"valueString": "some-value",
+			},
+		},
+	}
+	out, rep, err := reg.Marshal("Patient", instance)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, it := range rep.Items {
+		if it.Severity == SeverityViolation {
+			t.Errorf("unexpected violation: %+v", it)
+		}
+	}
+	exts := out["extension"].([]any)
+	ext := exts[0].(map[string]any)
+	if ext["valueString"] != "some-value" {
+		t.Errorf("valueString = %#v, want some-value", ext["valueString"])
 	}
 }

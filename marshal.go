@@ -179,7 +179,29 @@ func marshalObject(r *Registry, elem *ElementDefinition, tree *ElementTree, obj 
 		rep.add(SeverityWarning, elem.Path, "unknown key %q passed through", k)
 		out[k] = v
 	}
+
+	// FHIR's ext-1 invariant: an Extension must have either a value[x] or
+	// contained extensions, but never both. When both are present, drop the
+	// value[x] so the output remains valid FHIR.
+	if PrimaryTypeCode(elem) == "Extension" {
+		if vk := valueChoiceIn(out); vk != "" && out["extension"] != nil {
+			rep.add(SeverityViolation, elem.Path,
+				"Extension (URL=%v) must not have both a value and other contained extensions", out["url"])
+			delete(out, vk)
+		}
+	}
 	return out, nil
+}
+
+// valueChoiceIn returns the name of a value[x] choice key (e.g. "valueString",
+// "valueInteger") present in m, or "" if none is present.
+func valueChoiceIn(m map[string]any) string {
+	for k := range m {
+		if len(k) > 5 && k[:5] == "value" && k[5] >= 'A' && k[5] <= 'Z' {
+			return k
+		}
+	}
+	return ""
 }
 
 // isExtensionElement reports whether an element is an extension container,
