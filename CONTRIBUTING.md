@@ -55,8 +55,16 @@ The library is a single package, `fhir`, at the repository root:
 3. Run `go test ./...` and `go vet ./...`.
 4. Open a pull request describing the change and its motivation.
 
-## Changelog
+## CI
 
-User-visible changes are recorded in `CHANGELOG.md` using the
-[Keep a Changelog](https://keepachangelog.com/) format. Add an entry under
-`[Unreleased]` for any change that affects consumers.
+This project uses GitHub Actions for continuous integration. Every push and
+pull request runs:
+
+- `go build ./...`
+- `go vet ./...`
+- `go test ./...` with a coverage gate (80%)
+- `gofmt -l .` (format check)
+
+Releases are automated via Release Please. When a PR is merged with a
+conventional-commit message, Release Please opens a release PR. Merging that
+PR triggers a tagged release with an auto-generated changelog from git-cliff.
