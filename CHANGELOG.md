@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.1](https://github.com/jlcoulter/fhir-registry/compare/v0.1.0...v0.1.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* Enforce extension ext-1 invariant in marshal ([ac22ff6](https://github.com/jlcoulter/fhir-registry/commit/ac22ff6834cd049b3a45bc9a2da53b927100d02a))
+
 ## [Unreleased]
 
 ### Added
