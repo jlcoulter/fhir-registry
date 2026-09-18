@@ -154,7 +154,7 @@ func (r *Registry) FirstExampleCoding(resourceType, path, profileURL string) (Re
 			continue
 		}
 		if coding, ok := codingAtPath(inst.Raw, path); ok {
-			return r.conformExampleCoding(coding)
+			return coding, true
 		}
 	}
 	for _, inst := range instances {
@@ -162,39 +162,10 @@ func (r *Registry) FirstExampleCoding(resourceType, path, profileURL string) (Re
 			continue
 		}
 		if coding, ok := codingAtPath(inst.Raw, path); ok {
-			return r.conformExampleCoding(coding)
+			return coding, true
 		}
 	}
 	return ResolvedCoding{}, false
-}
-
-// conformExampleCoding validates a coding extracted from a package example
-// against the indexed CodeSystem. When the example's system is indexed:
-//   - a code that does not exist in that CodeSystem is rejected (an IG's own
-//     example can carry a stale/unknown code the validator rejects), and
-//   - the canonical CodeSystem display replaces the example's display, so a
-//     stale example display (e.g. "Simplified Profile for HL7 V2.4 REF message"
-//     vs canonical "HL7 V2.4 REF message (Level 2)") never ships.
-//
-// A system-less coding, or a system the registry has not indexed, is returned
-// as-is (it cannot be validated, and failing closed on every unindexed system
-// would drop too many real examples).
-func (r *Registry) conformExampleCoding(coding ResolvedCoding) (ResolvedCoding, bool) {
-	if coding.System == "" {
-		return coding, true
-	}
-	cs, ok := r.CodeSystem(stripCanonical(coding.System))
-	if !ok || cs == nil {
-		return coding, true
-	}
-	concept := findCodeSystemConceptByCode(cs.Concepts, coding.Code)
-	if concept == nil {
-		return ResolvedCoding{}, false
-	}
-	if concept.Display != "" {
-		coding.Display = concept.Display
-	}
-	return coding, true
 }
 
 // ExampleCodingForExtension searches every example instance for an extension
