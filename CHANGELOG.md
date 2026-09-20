@@ -5,13 +5,6 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.2.0](https://github.com/jlcoulter/fhir-registry/compare/v0.1.1...v0.2.0) (2026-09-20)
-
-
-### Features
-
-* validation updates using validator jar ([#5](https://github.com/jlcoulter/fhir-registry/issues/5)) ([3931698](https://github.com/jlcoulter/fhir-registry/commit/3931698c85783db49331b03caf6f0f48af5d2072))
-
 ## [0.1.1](https://github.com/jlcoulter/fhir-registry/compare/v0.1.0...v0.1.1) (2026-09-06)
 
 
