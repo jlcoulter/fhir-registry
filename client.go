@@ -345,8 +345,15 @@ func versionParts(v string) [3]int {
 // Download resolves a version reference (exact, wildcard, or floating) to an
 // exact version, fetches its tarball from the registry, and extracts it into
 // the cache. It returns the resolved version and the cache directory. It is a
-// no-op if the resolved package is already cached. When a matching local
-// archive is indexed, it is used instead of the network.
+// no-op if the resolved package is already cached.
+//
+// Version resolution policy, mirroring the official FHIR tooling:
+//   - Floating references ("current"/"latest"/"*") resolve to the registry's
+//     dist-tag via the network so the resolved version always matches what the
+//     official validator would pick. A local archive is used only as an
+//     offline fallback when the registry is unreachable.
+//   - Exact (and wildcard) references prefer a matching local archive, falling
+//     back to the network when none is present.
 func (c *PackageClient) Download(ctx context.Context, name, versionRef string) (resolvedVersion string, cacheDir string, err error) {
 	// Apply the conflict policy: if a version was already selected for this
 	// package, honour it.
@@ -363,27 +370,57 @@ func (c *PackageClient) Download(ctx context.Context, name, versionRef string) (
 		}
 	}
 
-	// Prefer a local archive when one matches.
-	if localVersion, localPath, ok := c.resolveLocalArchive(name, versionRef); ok {
-		c.selectedVersions[name] = localVersion
-		dir := c.PackageDir(name, localVersion)
-		if !c.Cached(name, localVersion) {
-			if err := os.MkdirAll(c.CacheDir, 0o755); err != nil {
-				return "", "", err
-			}
-			f, err := os.Open(localPath)
-			if err != nil {
-				return "", "", err
-			}
-			err = extractTGZToDir(f, dir)
-			f.Close()
-			if err != nil {
-				return "", "", fmt.Errorf("extracting local archive %s: %w", localPath, err)
-			}
+	// Floating references must resolve via the registry dist-tags so both the
+	// generator and the validator agree on the concrete version. Try the
+	// network first; a local archive is only an offline fallback.
+	if isFloatingVersion(versionRef) {
+		ver, dir, err := c.downloadFromNetwork(ctx, name, versionRef)
+		if err == nil {
+			return ver, dir, nil
 		}
-		return localVersion, dir, nil
+		if localVersion, localPath, ok := c.resolveLocalArchive(name, versionRef); ok {
+			return c.extractLocalArchive(name, localVersion, localPath)
+		}
+		return "", "", err
 	}
 
+	// Exact and wildcard references prefer a matching local archive, then the
+	// network.
+	if localVersion, localPath, ok := c.resolveLocalArchive(name, versionRef); ok {
+		return c.extractLocalArchive(name, localVersion, localPath)
+	}
+
+	return c.downloadFromNetwork(ctx, name, versionRef)
+}
+
+// extractLocalArchive copies a local package archive into the cache under its
+// resolved version and returns the cache directory. It records the selection
+// in the conflict-policy bookkeeping.
+func (c *PackageClient) extractLocalArchive(name, localVersion, localPath string) (string, string, error) {
+	c.selectedVersions[name] = localVersion
+	dir := c.PackageDir(name, localVersion)
+	if c.Cached(name, localVersion) {
+		return localVersion, dir, nil
+	}
+	if err := os.MkdirAll(c.CacheDir, 0o755); err != nil {
+		return "", "", err
+	}
+	f, err := os.Open(localPath)
+	if err != nil {
+		return "", "", err
+	}
+	err = extractTGZToDir(f, dir)
+	f.Close()
+	if err != nil {
+		return "", "", fmt.Errorf("extracting local archive %s: %w", localPath, err)
+	}
+	return localVersion, dir, nil
+}
+
+// downloadFromNetwork resolves a version reference against the registry
+// metadata, fetches the tarball, and extracts it into the cache. It returns
+// the resolved version and the cache directory.
+func (c *PackageClient) downloadFromNetwork(ctx context.Context, name, versionRef string) (string, string, error) {
 	resolvedVersion, tarballURL, err := c.resolveVersionAndTarball(ctx, name, versionRef)
 	if err != nil {
 		return "", "", err

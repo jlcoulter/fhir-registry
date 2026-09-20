@@ -781,6 +781,30 @@ func (r *Registry) DefinitionsForType(typeName string) []*StructureDefinition {
 	return defs
 }
 
+// IsAbstractType reports whether typeName is an abstract FHIR type (kind
+// "resource" with the abstract flag, or a logical type) rather than a concrete
+// resource that can be instantiated as seed data. It is derived from the
+// loaded StructureDefinitions so it stays correct for any FHIR IG, never from a
+// hardcoded type list. A type with no indexed definition is treated as
+// concrete.
+func (r *Registry) IsAbstractType(typeName string) bool {
+	if typeName == "" {
+		return true
+	}
+	r.mu.RLock()
+	defs := r.byType[typeName]
+	r.mu.RUnlock()
+	if len(defs) == 0 {
+		return false
+	}
+	for _, sd := range defs {
+		if sd.Abstract || sd.Kind == "logical" {
+			return true
+		}
+	}
+	return false
+}
+
 // Tree builds (and caches) the element tree for a canonical URL. For a
 // profile that has only a differential, the base definition is resolved from
 // the registry and the differential is merged onto its snapshot.
