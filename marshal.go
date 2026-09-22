@@ -3,6 +3,7 @@ package fhir
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // Severity distinguishes report items.
@@ -112,6 +113,14 @@ func profilesOf(elem *ElementDefinition) []string {
 func marshalObject(r *Registry, elem *ElementDefinition, tree *ElementTree, obj map[string]any, rep *MarshalReport) (any, error) {
 	children := r.baseChildren(tree, elem)
 
+	// A complex element whose datatype could not be resolved through the
+	// registry has no known children, so its cardinality cannot be enforced.
+	// Surface this instead of silently passing every key through as "unknown".
+	if len(children) == 0 && len(obj) > 0 && isComplexType(elem) {
+		rep.add(SeverityWarning, elem.Path,
+			"type %q could not be resolved; children not normalized against the IG", PrimaryTypeCode(elem))
+	}
+
 	out := make(map[string]any, len(obj))
 	emitted := make(map[string]bool, len(children))
 	// seen guards against sibling elements that share a last path segment:
@@ -150,8 +159,17 @@ func marshalObject(r *Registry, elem *ElementDefinition, tree *ElementTree, obj 
 			out[key] = norm
 		} else {
 			v := prim
-			if arr, isArr := prim.([]any); isArr && len(arr) == 1 {
+			// A max == 0 element must never unwrap a single-element array to a
+			// scalar: an array is still a forbidden value and marshalValue
+			// reports the bound.
+			if arr, isArr := prim.([]any); isArr && len(arr) == 1 && child.Max != 0 {
 				v = arr[0]
+			}
+			// A max == 0 element may never carry a scalar value.
+			if child.Max == 0 {
+				if _, isArr := prim.([]any); !isArr {
+					rep.add(SeverityViolation, child.Path, "max allowed = 0, but found a value")
+				}
 			}
 			norm, err := marshalValue(r, child, tree, v, rep)
 			if err != nil {
@@ -228,6 +246,10 @@ func marshalArray(r *Registry, elem *ElementDefinition, tree *ElementTree, obj m
 		}
 		norm = append(norm, n)
 	}
+	// A bounded repeat (max > 1 but finite) may not carry more values.
+	if !elem.Max.IsUnbounded() && len(norm) > int(elem.Max) {
+		rep.add(SeverityViolation, elem.Path, "max allowed = %d, but found %d", int(elem.Max), len(norm))
+	}
 	return norm, nil
 }
 
@@ -238,12 +260,16 @@ func marshalValue(r *Registry, elem *ElementDefinition, tree *ElementTree, v any
 	case []any:
 		// Match marshalObject's scalar handling: a single-element array for a
 		// single-valued (max == 1) element is unwrapped to its scalar value.
-		if !elem.Max.IsUnbounded() {
+		if elem.Max == 1 {
 			if len(val) == 1 {
 				return marshalValue(r, elem, tree, val[0], rep)
 			}
-			// More than one value for a max==1 element: keep the array; the
-			// elements are still normalized below.
+			// More than one value for a max==1 element: keep the array but
+			// report the upper-bound violation.
+			rep.add(SeverityViolation, elem.Path, "max allowed = 1, but found %d", len(val))
+		} else if !elem.Max.IsUnbounded() && len(val) > int(elem.Max) {
+			// A bounded repeat (max > 1) carries too many values.
+			rep.add(SeverityViolation, elem.Path, "max allowed = %d, but found %d", int(elem.Max), len(val))
 		}
 		norm := make([]any, 0, len(val))
 		for _, item := range val {
@@ -285,4 +311,11 @@ func lastSegment(path string) string {
 		return path[i+1:]
 	}
 	return path
+}
+
+// isComplexType reports whether an element's primary type is a complex
+// datatype (FHIR complex types are capitalized; primitives are lowercase).
+func isComplexType(elem *ElementDefinition) bool {
+	code := PrimaryTypeCode(elem)
+	return code != "" && unicode.IsUpper(rune(code[0]))
 }

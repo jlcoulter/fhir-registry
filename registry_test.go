@@ -118,6 +118,24 @@ func TestMaxIsUnbounded(t *testing.T) {
 	}
 }
 
+func TestIsMulti(t *testing.T) {
+	cases := []struct {
+		max  Max
+		want bool
+	}{
+		{MaxUnbounded, true},
+		{Max(2), true},
+		{Max(3), true},
+		{Max(1), false},
+		{Max(0), false},
+	}
+	for _, tc := range cases {
+		if got := IsMulti(&ElementDefinition{Max: tc.max}); got != tc.want {
+			t.Errorf("IsMulti(Max=%v) = %v, want %v", tc.max, got, tc.want)
+		}
+	}
+}
+
 func TestLoadPackage(t *testing.T) {
 	reg := loadTestRegistry(t)
 	if len(reg.byURL) == 0 {

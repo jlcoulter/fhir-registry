@@ -1028,9 +1028,12 @@ func parentIDOf(id string) string {
 // Cardinality helpers
 // ---------------------------------------------------------------------------
 
-// IsMulti reports whether the element has unbounded upper cardinality
-// (max = "*").
-func IsMulti(elem *ElementDefinition) bool { return elem.Max.IsUnbounded() }
+// IsMulti reports whether the element may appear more than once (max > 1,
+// including the unbounded max = "*"). FHIR JSON serialises such elements as
+// arrays.
+func IsMulti(elem *ElementDefinition) bool {
+	return elem.Max.IsUnbounded() || elem.Max > 1
+}
 
 // IsRequired reports whether the element has a non-zero minimum cardinality.
 func IsRequired(elem *ElementDefinition) bool { return elem.Min > 0 }
