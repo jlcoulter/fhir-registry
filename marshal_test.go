@@ -259,3 +259,116 @@ func TestMarshalSimpleExtensionKeepsValue(t *testing.T) {
 		t.Errorf("valueString = %#v, want some-value", ext["valueString"])
 	}
 }
+
+// newBoundedRepeatRegistry returns a registry with a synthetic Foo resource
+// whose "tag" element has the given cardinality and a "name" element of the
+// given type.
+func newBoundedRepeatRegistry(max Max, nameType string) *Registry {
+	reg := NewRegistry()
+	elements := []ElementDefinition{
+		{ID: "Foo", Path: "Foo", Min: 0, Max: 1},
+		{ID: "Foo.tag", Path: "Foo.tag", Min: 0, Max: max, Types: []ElementType{{Code: "string"}}},
+		{ID: "Foo.name", Path: "Foo.name", Min: 0, Max: 1, Types: []ElementType{{Code: nameType}}},
+	}
+	reg.AddStructureDefinition(NewStructureDefinition(
+		"http://example.org/StructureDefinition/foo", "Foo", "Foo", "resource", "", "", elements))
+	return reg
+}
+
+// TestMarshalBoundedRepeatWrapsScalar verifies that an element with a bounded
+// max > 1 (e.g. max="2") is marshalled as an array even when a single value is
+// provided, per FHIR JSON (repeating elements are always arrays).
+func TestMarshalBoundedRepeatWrapsScalar(t *testing.T) {
+	reg := newBoundedRepeatRegistry(Max(2), "")
+	out, _, err := reg.Marshal("Foo", map[string]any{"resourceType": "Foo", "tag": "single"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	tags, ok := out["tag"].([]any)
+	if !ok || len(tags) != 1 || tags[0] != "single" {
+		t.Errorf("bounded-repeat scalar = %#v, want [single]", out["tag"])
+	}
+}
+
+// TestMarshalBoundedRepeatOverflow verifies that a bounded repeat carrying more
+// values than its max reports a violation.
+func TestMarshalBoundedRepeatOverflow(t *testing.T) {
+	reg := newBoundedRepeatRegistry(Max(2), "")
+	_, rep, err := reg.Marshal("Foo", map[string]any{"resourceType": "Foo", "tag": []any{"a", "b", "c"}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var found bool
+	for _, it := range rep.Items {
+		if it.Severity == SeverityViolation && strings.Contains(it.Message, "max allowed = 2") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a max-cardinality violation, got %+v", rep.Items)
+	}
+}
+
+// TestMarshalMaxOneOverflow verifies that a max==1 element carrying multiple
+// values reports a violation (previously kept silently).
+func TestMarshalMaxOneOverflow(t *testing.T) {
+	reg := newBoundedRepeatRegistry(Max(1), "")
+	_, rep, err := reg.Marshal("Foo", map[string]any{"resourceType": "Foo", "tag": []any{"a", "b"}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var found bool
+	for _, it := range rep.Items {
+		if it.Severity == SeverityViolation && strings.Contains(it.Message, "max allowed = 1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a max-cardinality violation, got %+v", rep.Items)
+	}
+}
+
+// TestMarshalMaxZeroValue verifies that a max==0 element carrying a value
+// reports a violation, whether scalar or a single-element array.
+func TestMarshalMaxZeroValue(t *testing.T) {
+	for _, val := range []any{"x", []any{"x"}} {
+		reg := newBoundedRepeatRegistry(Max(0), "")
+		_, rep, err := reg.Marshal("Foo", map[string]any{"resourceType": "Foo", "tag": val})
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var found bool
+		for _, it := range rep.Items {
+			if it.Severity == SeverityViolation && strings.Contains(it.Message, "max allowed = 0") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("value %#v: expected a max=0 violation, got %+v", val, rep.Items)
+		}
+	}
+}
+
+// TestMarshalUnresolvedComplexTypeWarning verifies that when a complex element's
+// datatype cannot be resolved through the registry, Marshal reports a warning
+// instead of silently passing children through with per-key "unknown" noise.
+func TestMarshalUnresolvedComplexTypeWarning(t *testing.T) {
+	reg := newBoundedRepeatRegistry(Max(1), "UnknownComplex")
+	_, rep, err := reg.Marshal("Foo", map[string]any{
+		"resourceType": "Foo",
+		"name":         map[string]any{"given": []any{"Jane"}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var found bool
+	for _, it := range rep.Items {
+		if it.Severity == SeverityWarning && it.Path == "Foo.name" && strings.Contains(it.Message, "could not be resolved") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected unresolved-complex-type warning, got %+v", rep.Items)
+	}
+}
+
